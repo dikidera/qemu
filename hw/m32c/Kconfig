@@ -1,0 +1,6 @@
+config ECU_M32C87
+    bool
+    default y
+    depends on M32C
+    select ECU_ENGINE
+    select CAN_BUS
