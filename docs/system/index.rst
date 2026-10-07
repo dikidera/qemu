@@ -35,6 +35,7 @@ or Hypervisor.Framework.
    cpu-hotplug
    pr-manager
    targets
+   ecu-emulator
    security
    multi-process
    confidential-guest-support

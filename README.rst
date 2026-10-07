@@ -2,6 +2,12 @@
 QEMU README
 ===========
 
+.. note::
+
+   This fork adds ECU (engine control unit) emulation: SH-2/SH-2E and
+   M32C/80 cores, SH705x and M32C/87 microcontroller models and an engine
+   simulator.  See ``docs/system/ecu-emulator.rst``.
+
 QEMU is a generic and open source machine & userspace emulator and
 virtualizer.
 

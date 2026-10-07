@@ -199,3 +199,99 @@ class Asm:
             elif kind == 'a24':
                 self.img[off:off + 3] = struct.pack('<I', t)[:3]
         return bytes(self.img)
+
+
+class Asm2(Asm):
+    """more instructions for the CPU self test"""
+
+    def cmp_w(self, src, dst):
+        self.g2(0x6, src, dst, 1)
+
+    def adc_w_imm(self, imm, dst):
+        self.emit(b'\x01')
+        self.g1(0x80, 0x2e, dst, 1, struct.pack('<H', imm & 0xffff))
+
+    def sbb_w_imm(self, imm, dst):
+        self.emit(b'\x01')
+        self.g1(0x90, 0x2e, dst, 1, struct.pack('<H', imm & 0xffff))
+
+    def sub_w_imm(self, imm, dst):
+        self.g1(0x80, 0x3e, dst, 1, struct.pack('<H', imm & 0xffff))
+
+    def mul_w_imm(self, imm, dst):
+        self.g1(0x80, 0x1f, dst, 1, struct.pack('<H', imm & 0xffff))
+
+    def div_w_imm(self, imm):
+        self.emit(bytes([0xb0, 0x53]) + struct.pack('<H', imm & 0xffff))
+
+    def divx_w_imm(self, imm):
+        self.emit(bytes([0xb2, 0x53]) + struct.pack('<H', imm & 0xffff))
+
+    def sha_w(self, n, dst):
+        code = (n - 1) if n > 0 else (8 | (-n - 1))
+        self.g1(0xf0, code, dst, 1)
+
+    def rot_w(self, n, dst):
+        code = (n - 1) if n > 0 else (8 | (-n - 1))
+        self.g1(0xe0, 0x20 | code, dst, 1)
+
+    def rolc_w(self, dst):
+        self.g1(0xb0, 0x2e, dst, 1)
+
+    def rorc_w(self, dst):
+        self.g1(0xa0, 0x2e, dst, 1)
+
+    def neg_w(self, dst):
+        self.g1(0xa0, 0x2f, dst, 1)
+
+    def not_w(self, dst):
+        self.g1(0xa0, 0x1e, dst, 1)
+
+    def exts_b(self, dst):
+        self.g1(0xc0, 0x1e, dst, 0)
+
+    def extz_b(self, src, dst):
+        self.g2(0xb, src, dst, 0, prefix=b'\x01')
+
+    def push_w(self, dst):
+        self.g1(0xc0, 0x0e, dst, 1)
+
+    def pop_w(self, dst):
+        self.g1(0xb0, 0x2f, dst, 1)
+
+    def enter(self, n):
+        self.emit(bytes([0xec, n]))
+
+    def exitd(self):
+        self.emit(b'\xfc')
+
+    def indexw_w(self, dst):
+        self.g1(0x80, 0x33, dst, 0)
+
+    def smovf_w(self):
+        self.emit(b'\xb0\x93')
+
+    def sstr_b(self):
+        self.emit(b'\xb8\x03')
+
+    def int_(self, n):
+        self.emit(bytes([0xbe, n << 2]))
+
+    def adjnz_w(self, imm, dst, lbl):
+        at = self.pc
+        self.g1(0xf0, 0x10 | (imm & 0xf), dst, 1)
+        self.fixups.append((self.pc, 'adjnz', lbl, at))
+        self.emit(b'\0')
+
+    def mov_w_ind_src(self, src, dst):
+        """MOV.W [src], dst (indirect source prefix)"""
+        self.g2(0xb, src, dst, 1, prefix=b'\x41')
+
+    def build(self):
+        for i, (at, kind, lbl, extra) in enumerate(self.fixups):
+            if kind == 'adjnz':
+                d = self.labels[lbl] - (extra + 2)
+                assert -128 <= d < 128
+                struct.pack_into('<b', self.img, at - self.base, d)
+        self.fixups = [f for f in self.fixups if f[1] != 'adjnz']
+        return super().build()

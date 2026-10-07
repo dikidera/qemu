@@ -12,10 +12,17 @@
 import sys
 from shasm import Asm, Pool
 
-a = Asm(1 << 20)
-p = Pool(a, 'p')
+# usage: sh7058_test_rom.py out.bin [7058|7055|7054|7052]
+VARIANT = sys.argv[2] if len(sys.argv) > 2 else '7058'
+RAM, RAM_TOP, ROM_SIZE, HCAN2 = {
+    '7058': (0xFFFF0000, 0xFFFFC000, 1 << 20, True),
+    '7055': (0xFFFF6000, 0xFFFFE000, 512 << 10, False),
+    '7054': (0xFFFF8000, 0xFFFFC000, 384 << 10, False),
+    '7052': (0xFFFF8000, 0xFFFFB000, 256 << 10, False),
+}[VARIANT]
 
-RAM = 0xFFFF0000
+a = Asm(ROM_SIZE)
+p = Pool(a, 'p')
 TICKS = RAM + 0x100       # CMT 1 ms ticks
 TEETH = RAM + 0x104       # crank edges
 
@@ -26,7 +33,7 @@ TDR0 = SCI0 + 3
 # vector table
 a.org(0)
 a.long('reset')
-a.long(0xFFFFBFF0)
+a.long(RAM_TOP - 0x10)
 for v in range(2, 256):
     a.long('unhandled')
 a.org(84 * 4)
@@ -83,28 +90,79 @@ a.lit(0xFFFFF42E, 9, p); a.mov_i(1, 0); a.st('w', 0, 9)        # TIER0: ICEA
 a.lit(0xFFFFF668, 9, p); a.mov_i(0, 0); a.st('b', 0, 9)        # TCR8
 a.lit(0xFFFFF401, 9, p); a.mov_i(1, 0); a.st('b', 0, 9)        # TSTR1: STR0
 
-# --- HCAN0 (HCAN2): leave reset, MB1 tx id 0x123, MB2 rx id 0x7E0
-H = 0xFFFFD000
-a.lit(H, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)                 # MCR = 0
-a.label('canwait')
-a.lit(H + 2, 9, p); a.ld('w', 9, 0); a.tst_i(0x08); a.bf('canwait')
-MB1 = H + 0x100 + 0x20
-a.lit(MB1, 9, p); a.lit(0x123 << 4, 0, p); a.st('w', 0, 9)
-a.lit(MB1 + 2, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)
-a.lit(MB1 + 4, 9, p); a.mov_i(8, 0); a.st('w', 0, 9)            # MBC=0, DLC=8
-a.lit(MB1 + 8, 9, p); a.lit(0x51454D55, 0, p); a.st('l', 0, 9)  # "QEMU"
-a.lit(MB1 + 12, 9, p); a.lit(0x45435521, 0, p); a.st('l', 0, 9) # "ECU!"
-MB2 = H + 0x100 + 0x40
-a.lit(MB2, 9, p); a.lit(0x7E0 << 4, 0, p); a.st('w', 0, 9)
-a.lit(MB2 + 2, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)
-a.lit(MB2 + 4, 9, p); a.lit(0x0408, 0, p); a.st('w', 0, 9)      # MBC=4 rx data
-a.lit(MB2 + 0x10, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)        # LAFM exact
-a.lit(MB2 + 0x12, 9, p); a.st('w', 0, 9)
-a.lit(H + 0x22, 9, p); a.mov_i(2, 0); a.st('w', 0, 9)          # TXPR0 MB1
-a.lit(H + 0x32, 9, p); a.ld('w', 9, 0); a.tst_i(2); a.bt('cantxfail')
-a.lit(ord('C') << 24 | ord('A') << 16 | ord('N') << 8 | ord('T'), 4, p)
-a.bsr('putc4'); a.nop()
-a.label('cantxfail')
+if HCAN2:
+    # --- HCAN0 (HCAN2): leave reset, MB1 tx id 0x123, MB2 rx id 0x7E0
+    H = 0xFFFFD000
+    a.lit(H, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)                 # MCR = 0
+    a.label('canwait')
+    a.lit(H + 2, 9, p); a.ld('w', 9, 0); a.tst_i(0x08); a.bf('canwait')
+    MB1 = H + 0x100 + 0x20
+    a.lit(MB1, 9, p); a.lit(0x123 << 4, 0, p); a.st('w', 0, 9)
+    a.lit(MB1 + 2, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)
+    a.lit(MB1 + 4, 9, p); a.mov_i(8, 0); a.st('w', 0, 9)            # MBC=0, DLC=8
+    a.lit(MB1 + 8, 9, p); a.lit(0x51454D55, 0, p); a.st('l', 0, 9)  # "QEMU"
+    a.lit(MB1 + 12, 9, p); a.lit(0x45435521, 0, p); a.st('l', 0, 9) # "ECU!"
+    MB2 = H + 0x100 + 0x40
+    a.lit(MB2, 9, p); a.lit(0x7E0 << 4, 0, p); a.st('w', 0, 9)
+    a.lit(MB2 + 2, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)
+    a.lit(MB2 + 4, 9, p); a.lit(0x0408, 0, p); a.st('w', 0, 9)      # MBC=4 rx data
+    a.lit(MB2 + 0x10, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)        # LAFM exact
+    a.lit(MB2 + 0x12, 9, p); a.st('w', 0, 9)
+    # HCAN1: MB2 receives id 0x123 (bus loopback test, needs both on one bus)
+    H1 = 0xFFFFD800
+    a.lit(H1, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)
+    H1MB2 = H1 + 0x100 + 0x40
+    a.lit(H1MB2, 9, p); a.lit(0x123 << 4, 0, p); a.st('w', 0, 9)
+    a.lit(H1MB2 + 2, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)
+    a.lit(H1MB2 + 4, 9, p); a.lit(0x0408, 0, p); a.st('w', 0, 9)
+    a.lit(H1MB2 + 0x10, 9, p); a.mov_i(0, 0); a.st('w', 0, 9)
+    a.lit(H1MB2 + 0x12, 9, p); a.st('w', 0, 9)
+    a.lit(H + 0x22, 9, p); a.mov_i(2, 0); a.st('w', 0, 9)          # TXPR0 MB1
+    a.lit(H + 0x32, 9, p); a.ld('w', 9, 0); a.tst_i(2); a.bt('cantxfail')
+    a.lit(ord('C') << 24 | ord('A') << 16 | ord('N') << 8 | ord('T'), 4, p)
+    a.bsr('putc4'); a.nop()
+    a.label('cantxfail')
+    a.lit(H1 + 0x42, 9, p); a.ld('w', 9, 0); a.tst_i(4); a.bt('canrxfail')
+    a.lit(ord('R') << 24 | ord('X') << 16 | ord('1') << 8 | ord('='), 4, p)
+    a.bsr('putc4'); a.nop()
+    a.lit(H1MB2 + 8, 9, p); a.ld('l', 9, 4); a.bsr('puthex'); a.nop()
+    a.mov_i(10, 4); a.bsr('putc'); a.nop()
+    a.label('canrxfail')
+
+
+else:
+    # --- HCAN0 (HCAN, 16 mailboxes): MB1 tx id 0x123; HCAN1 MB2 rx 0x123
+    H = 0xFFFFE400
+    H1 = 0xFFFFE600
+    a.lit(H, 9, p); a.mov_i(0, 0); a.st('b', 0, 9)                 # MCR = 0
+    a.lit(H1, 9, p); a.st('b', 0, 9)
+    a.label('canwait')
+    a.lit(H + 1, 9, p); a.ld('b', 9, 0); a.tst_i(0x08); a.bf('canwait')
+    # MC1: DLC 8, std id 0x123 (MCx[5]: id[2:0]<<5, MCx[6]: id[10:3])
+    a.lit(H + 0x28, 9, p); a.mov_i(8, 0); a.st('b', 0, 9)
+    a.lit(H + 0x2c, 9, p); a.lit((0x123 & 7) << 5, 0, p); a.st('b', 0, 9)
+    a.lit(H + 0x2d, 9, p); a.lit(0x123 >> 3, 0, p); a.st('b', 0, 9)
+    a.lit(H + 0xb8, 9, p); a.lit(0x51454D55, 0, p); a.st('l', 0, 9)  # MD1
+    a.lit(H + 0xbc, 9, p); a.lit(0x45435521, 0, p); a.st('l', 0, 9)
+    # HCAN1 MB2 receive (MBCR bit for MB2 = 0x0400), id 0x123
+    a.lit(H1 + 4, 9, p); a.lit(0x0400, 0, p); a.st('w', 0, 9)
+    a.lit(H1 + 0x34, 9, p); a.lit((0x123 & 7) << 5, 0, p); a.st('b', 0, 9)
+    a.lit(H1 + 0x35, 9, p); a.lit(0x123 >> 3, 0, p); a.st('b', 0, 9)
+    a.lit(H + 6, 9, p); a.lit(0x0200, 0, p); a.st('w', 0, 9)       # TXPR MB1
+    a.lit(H + 0xa, 9, p); a.ld('w', 9, 0); a.lit(0x0200, 1, p); a.tst(1, 0)
+    a.bt('cantxfail')
+    a.lit(ord('C') << 24 | ord('A') << 16 | ord('N') << 8 | ord('T'), 4, p)
+    a.bsr('putc4'); a.nop()
+    a.label('cantxfail')
+    a.lit(H1 + 0xe, 9, p); a.ld('w', 9, 0); a.lit(0x0400, 1, p); a.tst(1, 0)
+    a.bt('canrxfail')
+    a.lit(ord('R') << 24 | ord('X') << 16 | ord('1') << 8 | ord('='), 4, p)
+    a.bsr('putc4'); a.nop()
+    a.lit(H1 + 0xc0, 9, p); a.ld('l', 9, 4); a.bsr('puthex'); a.nop()
+    a.mov_i(10, 4); a.bsr('putc'); a.nop()
+    a.label('canrxfail')
+    MB2 = None
+
 
 # enable interrupts (SR.I = 0)
 a.mov_i(0, 0); a.ldc_sr(0)
@@ -120,11 +178,13 @@ a.lit(TEETH, 9, p); a.ld('l', 9, 4); a.bsr('puthex'); a.nop()
 a.mov_i(10, 4); a.bsr('putc'); a.nop()
 a.bra('main'); a.nop()
 a.label('wait2')
-a.lit(H + 0x42, 10, p); a.ld('w', 10, 0); a.tst_i(4); a.bt('wait')
+if not HCAN2:
+    a.bra('wait'); a.nop()
+a.lit(0xFFFFD042, 10, p); a.ld('w', 10, 0); a.tst_i(4); a.bt('wait')
 a.mov_i(4, 0); a.st('w', 0, 10)                                 # clear RXPR
 a.lit(ord('R') << 24 | ord('X') << 16 | ord('O') << 8 | ord('K'), 4, p)
 a.bsr('putc4'); a.nop()
-a.lit(MB2 + 8, 10, p); a.ld('l', 10, 4); a.bsr('puthex'); a.nop()
+a.lit(0xFFFFD148, 10, p); a.ld('l', 10, 4); a.bsr('puthex'); a.nop()
 a.mov_i(10, 4); a.bsr('putc'); a.nop()
 a.bra('wait'); a.nop()
 p.emit()

@@ -128,6 +128,12 @@ static int32_t sx(uint32_t v, int size)
     return (int32_t)(v << sh) >> sh;
 }
 
+/* 4-bit signed immediate in op2[3:0] (:Q formats, ADJNZ) */
+static int32_t sx4(uint8_t v)
+{
+    return (int32_t)((uint32_t)v << 28) >> 28;
+}
+
 static uint32_t base_reg(ExecCtx *x, int lo)
 {
     switch (lo) {
@@ -608,7 +614,7 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             set_sz(x, size, d->imm);
             break;
         case F_Q4_DST5:
-            r = sx(d->b2 & 0xf, 1) & size_mask(size);
+            r = sx4(d->b2) & size_mask(size);
             dl = dst_loc(x, d, size);
             wr(x, &dl, size, r);
             set_sz(x, size, r);
@@ -747,7 +753,7 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             }
             break;
         case F_Q4_DST5:
-            b = sx(d->b2 & 0xf, 1);
+            b = sx4(d->b2);
             break;
         case F_SRC5_DST5:
             sl = src_loc(x, d, ssize);
@@ -1147,7 +1153,7 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
         break;
     case OP_ADJNZ:
         dl = dst_loc(x, d, size);
-        r = (rd(x, &dl, size) + sx(d->b2 & 0xf, 1)) & size_mask(size);
+        r = (rd(x, &dl, size) + sx4(d->b2)) & size_mask(size);
         wr(x, &dl, size, r);
         if (r) {
             env->pc = d->target;

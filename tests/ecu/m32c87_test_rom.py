@@ -76,6 +76,14 @@ a.mov_b_imm(0x123 & 0x3f, ABS16(0x01e1))
 a.mov_b_imm(8, ABS16(0x01e5))
 for i, ch in enumerate(b'QEMU-M32'):
     a.mov_b_imm(ch, ABS16(0x01e6 + i))
+# CAN1 (base 0x0280, slot window 0x0260): slot 0 receives std id 0x123
+a.mov_w_imm(0x0000, ABS16(0x0280))
+a.mov_b_imm(0x00, ABS16(0x02a0))       # C1SBS
+for i in range(6):
+    a.mov_b_imm(0xff, ABS16(0x02a8 + i))   # C1GMR: compare all bits
+a.mov_b_imm(0x123 >> 6, ABS16(0x0260))
+a.mov_b_imm(0x123 & 0x3f, ABS16(0x0261))
+a.mov_b_imm(0x40, ABS16(0x02b0))       # C1MCTL0: RECREQ
 a.mov_b_imm(0x80, ABS16(0x0230))       # C0MCTL0: TRMREQ
 a.btst(0, ABS16(0x0230))
 a.j(EQ, 'cantxfail')
@@ -83,6 +91,16 @@ for ch in b'CANT':
     a.mov_b_imm(ch, R0L)
     a.jsr('putc')
 a.label('cantxfail')
+a.btst(0, ABS16(0x02b0))               # C1MCTL0 NEWDATA
+a.j(EQ, 'canrxfail')
+for ch in b'RX1=':
+    a.mov_b_imm(ch, R0L)
+    a.jsr('putc')
+a.mov_w(ABS16(0x0266), R0)
+a.jsr('puthex')
+a.mov_b_imm(0x0a, R0L)
+a.jsr('putc')
+a.label('canrxfail')
 
 a.fset('I')
 
