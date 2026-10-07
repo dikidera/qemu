@@ -32,6 +32,8 @@
 #define SH_CPU_SH7751  (1 << 3)
 #define SH_CPU_SH7751R (1 << 4)
 #define SH_CPU_SH7785  (1 << 5)
+#define SH_CPU_SH2     (1 << 6)
+#define SH_CPU_SH2E    (1 << 7)
 #define SH_CPU_SH7750_ALL (SH_CPU_SH7750 | SH_CPU_SH7750S | SH_CPU_SH7750R)
 #define SH_CPU_SH7751_ALL (SH_CPU_SH7751 | SH_CPU_SH7751R)
 
@@ -127,7 +129,37 @@ typedef struct tlb_t {
 enum sh_features {
     SH_FEATURE_SH4A = 1,
     SH_FEATURE_BCR3_AND_BCR4 = 2,
+    /*
+     * SH-2 family core (SH7050..SH7059 automotive MCUs): no MMU, no
+     * privilege levels, no register banks, exceptions push SR/PC on the
+     * stack and vector through VBR.
+     */
+    SH_FEATURE_SH2 = 4,
+    /* SH-2 core without an FPU (plain SH-2, as opposed to SH-2E). */
+    SH_FEATURE_NO_FPU = 8,
 };
+
+/* SH-2 SR only implements M, Q, I3..I0, S and T. */
+#define SH2_SR_MASK 0x000003f3
+
+/* SH-2 exception vector numbers (vector table entry = VBR + 4 * vec) */
+#define SH2_VEC_POWERON_PC      0
+#define SH2_VEC_POWERON_SP      1
+#define SH2_VEC_ILLEGAL         4
+#define SH2_VEC_SLOT_ILLEGAL    6
+#define SH2_VEC_CPU_ADDR_ERR    9
+#define SH2_VEC_DMA_ADDR_ERR    10
+#define SH2_VEC_NMI             11
+#define SH2_VEC_USER_BREAK      12
+#define SH2_VEC_FPU             13
+
+/*
+ * Callback used by SH-2 SoC interrupt controllers.  Returns the vector
+ * number of the highest priority pending interrupt whose priority is
+ * strictly above @imask, and stores its priority in *@level.  Returns -1
+ * when nothing can be accepted.
+ */
+typedef int (*SH2IrqQueryFn)(void *opaque, int imask, int *level);
 
 typedef struct memory_content {
     uint32_t address;
@@ -199,6 +231,8 @@ typedef struct CPUArchState {
     uint32_t features;
 
     void *intc_handle;
+    SH2IrqQueryFn sh2_irq_query;   /* SH-2: SoC interrupt controller */
+    void *sh2_irq_opaque;
     int in_sleep;               /* SR_BL ignored during sleep */
     memory_content *movcal_backup;
     memory_content **movcal_backup_tail;

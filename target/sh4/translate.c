@@ -368,6 +368,11 @@ static inline void gen_store_fpr64(DisasContext *ctx, TCGv_i64 t, int reg)
         goto do_illegal;                    \
     }
 
+#define CHECK_NOT_SH2 \
+    if (ctx->features & SH_FEATURE_SH2) {     \
+        goto do_illegal;                      \
+    }
+
 #define CHECK_SH4A \
     if (!(ctx->features & SH_FEATURE_SH4A)) { \
         goto do_illegal;                      \
@@ -434,11 +439,28 @@ static void _decode_opc(DisasContext * ctx)
         return;
     case 0x0038: /* ldtlb */
         CHECK_PRIVILEGED
+        CHECK_NOT_SH2
         gen_helper_ldtlb(tcg_env);
         return;
     case 0x002b: /* rte */
         CHECK_PRIVILEGED
         CHECK_NOT_DELAY_SLOT
+        if (ctx->features & SH_FEATURE_SH2) {
+            /* SH-2: PC and SR are popped from the stack. */
+            TCGv val = tcg_temp_new();
+            tcg_gen_qemu_ld_i32(cpu_delayed_pc, REG(15), ctx->memidx,
+                                MO_TEUL | MO_ALIGN);
+            tcg_gen_addi_i32(REG(15), REG(15), 4);
+            tcg_gen_qemu_ld_i32(val, REG(15), ctx->memidx,
+                                MO_TEUL | MO_ALIGN);
+            tcg_gen_addi_i32(REG(15), REG(15), 4);
+            tcg_gen_andi_i32(val, val, SH2_SR_MASK);
+            gen_write_sr(val);
+            ctx->envflags |= TB_FLAG_DELAY_SLOT;
+            ctx->delayed_pc = (uint32_t) - 1;
+            ctx->base.is_jmp = DISAS_STOP;
+            return;
+        }
         gen_write_sr(cpu_ssr);
         tcg_gen_mov_i32(cpu_delayed_pc, cpu_spc);
         ctx->envflags |= TB_FLAG_DELAY_SLOT_RTE;
@@ -1289,20 +1311,24 @@ static void _decode_opc(DisasContext * ctx)
     switch (ctx->opcode & 0xf08f) {
     case 0x408e: /* ldc Rm,Rn_BANK */
         CHECK_PRIVILEGED
+        CHECK_NOT_SH2
         tcg_gen_mov_i32(ALTREG(B6_4), REG(B11_8));
         return;
     case 0x4087: /* ldc.l @Rm+,Rn_BANK */
         CHECK_PRIVILEGED
+        CHECK_NOT_SH2
         tcg_gen_qemu_ld_i32(ALTREG(B6_4), REG(B11_8), ctx->memidx,
                             MO_TESL | MO_ALIGN);
         tcg_gen_addi_i32(REG(B11_8), REG(B11_8), 4);
         return;
     case 0x0082: /* stc Rm_BANK,Rn */
         CHECK_PRIVILEGED
+        CHECK_NOT_SH2
         tcg_gen_mov_i32(REG(B11_8), ALTREG(B6_4));
         return;
     case 0x4083: /* stc.l Rm_BANK,@-Rn */
         CHECK_PRIVILEGED
+        CHECK_NOT_SH2
         {
             TCGv addr = tcg_temp_new();
             tcg_gen_subi_i32(addr, REG(B11_8), 4);
@@ -1354,7 +1380,8 @@ static void _decode_opc(DisasContext * ctx)
         CHECK_PRIVILEGED
         {
             TCGv val = tcg_temp_new();
-            tcg_gen_andi_i32(val, REG(B11_8), 0x700083f3);
+            tcg_gen_andi_i32(val, REG(B11_8), ctx->features & SH_FEATURE_SH2 ?
+                             SH2_SR_MASK : 0x700083f3);
             gen_write_sr(val);
             ctx->base.is_jmp = DISAS_STOP;
         }
@@ -1365,7 +1392,8 @@ static void _decode_opc(DisasContext * ctx)
             TCGv val = tcg_temp_new();
             tcg_gen_qemu_ld_i32(val, REG(B11_8), ctx->memidx,
                                 MO_TESL | MO_ALIGN);
-            tcg_gen_andi_i32(val, val, 0x700083f3);
+            tcg_gen_andi_i32(val, val, ctx->features & SH_FEATURE_SH2 ?
+                             SH2_SR_MASK : 0x700083f3);
             gen_write_sr(val);
             tcg_gen_addi_i32(REG(B11_8), REG(B11_8), 4);
             ctx->base.is_jmp = DISAS_STOP;
@@ -1417,11 +1445,11 @@ static void _decode_opc(DisasContext * ctx)
         ST(reg,stnum,stpnum,prechk)
         LDST(gbr,  0x401e, 0x4017, 0x0012, 0x4013, {})
         LDST(vbr,  0x402e, 0x4027, 0x0022, 0x4023, CHECK_PRIVILEGED)
-        LDST(ssr,  0x403e, 0x4037, 0x0032, 0x4033, CHECK_PRIVILEGED)
-        LDST(spc,  0x404e, 0x4047, 0x0042, 0x4043, CHECK_PRIVILEGED)
-        ST(sgr,  0x003a, 0x4032, CHECK_PRIVILEGED)
+        LDST(ssr,  0x403e, 0x4037, 0x0032, 0x4033, CHECK_PRIVILEGED CHECK_NOT_SH2)
+        LDST(spc,  0x404e, 0x4047, 0x0042, 0x4043, CHECK_PRIVILEGED CHECK_NOT_SH2)
+        ST(sgr,  0x003a, 0x4032, CHECK_PRIVILEGED CHECK_NOT_SH2)
         LD(sgr,  0x403a, 0x4036, CHECK_PRIVILEGED CHECK_SH4A)
-        LDST(dbr,  0x40fa, 0x40f6, 0x00fa, 0x40f2, CHECK_PRIVILEGED)
+        LDST(dbr,  0x40fa, 0x40f6, 0x00fa, 0x40f2, CHECK_PRIVILEGED CHECK_NOT_SH2)
         LDST(mach, 0x400a, 0x4006, 0x000a, 0x4002, {})
         LDST(macl, 0x401a, 0x4016, 0x001a, 0x4012, {})
         LDST(pr,   0x402a, 0x4026, 0x002a, 0x4022, {})
@@ -1459,6 +1487,7 @@ static void _decode_opc(DisasContext * ctx)
         }
         return;
     case 0x00c3: /* movca.l R0,@Rm */
+        CHECK_NOT_SH2
         {
             TCGv val = tcg_temp_new();
             tcg_gen_qemu_ld_i32(val, REG(B11_8), ctx->memidx,
@@ -1549,17 +1578,20 @@ static void _decode_opc(DisasContext * ctx)
         }
         return;
     case 0x0093: /* ocbi @Rn */
+        CHECK_NOT_SH2
         {
             gen_helper_ocbi(tcg_env, REG(B11_8));
         }
         return;
     case 0x00a3: /* ocbp @Rn */
     case 0x00b3: /* ocbwb @Rn */
+        CHECK_NOT_SH2
         /* These instructions are supposed to do nothing in case of
            a cache miss. Given that we only partially emulate caches
            it is safe to simply ignore them. */
         return;
     case 0x0083: /* pref @Rn */
+        CHECK_NOT_SH2
         return;
     case 0x00d3: /* prefi @Rn */
         CHECK_SH4A
@@ -1798,7 +1830,27 @@ static void decode_opc(DisasContext * ctx)
 #endif
 
         tcg_gen_movi_i32(cpu_flags, ctx->envflags);
-        if (old_flags & TB_FLAG_DELAY_SLOT_COND) {
+        if (ctx->base.pc_next == ctx->base.pc_first &&
+            (ctx->tbflags & TB_FLAG_DELAY_SLOT_MASK)) {
+            /*
+             * This TB started inside a delay slot, typically because
+             * the branch (or RTE) ended the previous TB.  Interrupts are
+             * refused while in a delay slot, so return to the main loop
+             * instead of chaining to let a pending one be accepted now.
+             */
+            if (old_flags & TB_FLAG_DELAY_SLOT_COND) {
+                tcg_gen_movcond_i32(TCG_COND_NE, cpu_pc, cpu_delayed_cond,
+                                    tcg_constant_i32(0), cpu_delayed_pc,
+                                    tcg_constant_i32(ctx->base.pc_next + 2));
+                tcg_gen_discard_i32(cpu_delayed_cond);
+            } else if (ctx->delayed_pc == -1) {
+                tcg_gen_mov_i32(cpu_pc, cpu_delayed_pc);
+            } else {
+                tcg_gen_movi_i32(cpu_pc, ctx->delayed_pc);
+            }
+            tcg_gen_exit_tb(NULL, 0);
+            ctx->base.is_jmp = DISAS_NORETURN;
+        } else if (old_flags & TB_FLAG_DELAY_SLOT_COND) {
             gen_delayed_conditional_jump(ctx);
         } else {
             gen_jump(ctx);

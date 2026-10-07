@@ -1,0 +1,4 @@
+# See docs/devel/tracing.rst for syntax documentation.
+
+# ecu-io.c
+ecu_pin_mcu_drive(const char *pin, int level) "%s=%d"

@@ -135,6 +135,7 @@ void hmp_mouse_move(MonitorHMP *hmp, const QDict *qdict);
 void hmp_mouse_button(MonitorHMP *hmp, const QDict *qdict);
 void hmp_mouse_set(MonitorHMP *hmp, const QDict *qdict);
 void hmp_sendkey(MonitorHMP *hmp, const QDict *qdict);
+void hmp_ecu(MonitorHMP *hmp, const QDict *qdict);
 void coroutine_fn hmp_screendump(MonitorHMP *hmp, const QDict *qdict);
 void hmp_chardev_add(MonitorHMP *hmp, const QDict *qdict);
 void hmp_chardev_change(MonitorHMP *hmp, const QDict *qdict);

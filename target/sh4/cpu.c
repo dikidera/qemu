@@ -53,6 +53,17 @@ static TCGTBCPUState superh_get_tb_cpu_state(CPUState *cs)
             | (env->fpscr & TB_FLAG_FPSCR_MASK)
             | (env->sr & TB_FLAG_SR_MASK)
             | (env->movcal_backup ? TB_FLAG_PENDING_MOVCA : 0); /* Bit 3 */
+    if (env->features & SH_FEATURE_SH2) {
+        /* SH-2 has no user mode: everything runs "privileged", bank 0. */
+        flags |= TB_FLAG_SR_MD;
+        flags &= ~TB_FLAG_SR_RB;
+        if (env->features & SH_FEATURE_NO_FPU) {
+            /* FPU opcodes raise an illegal instruction exception. */
+            flags |= TB_FLAG_SR_FD;
+        } else {
+            flags &= ~TB_FLAG_SR_FD;
+        }
+    }
 #ifdef CONFIG_USER_ONLY
     flags |= TB_FLAG_UNALIGN * !cs->prctl_unalign_sigbus;
 #endif
@@ -117,6 +128,10 @@ static int sh4_cpu_mmu_index(CPUState *cs, bool ifetch)
 {
     CPUSH4State *env = cpu_env(cs);
 
+    if (env->features & SH_FEATURE_SH2) {
+        return 0;
+    }
+
     /*
      * The instruction in a RTE delay slot is fetched in privileged mode,
      * but executed in user mode.
@@ -145,6 +160,16 @@ static void superh_cpu_reset_hold(Object *obj, ResetType type)
     env->fpscr = FPSCR_PR; /* value for userspace according to the kernel */
     set_float_rounding_mode(float_round_nearest_even, &env->fp_status); /* ?! */
 #else
+    if (env->features & SH_FEATURE_SH2) {
+        /*
+         * SH-2 power-on reset: I3..I0 = 1111, VBR = 0.  PC and SP are
+         * fetched from vector table entries 0 and 1 by the board, once
+         * the ROM image has been loaded (see sh2_cpu_load_reset_vectors).
+         */
+        env->pc = 0;
+        env->sr = (1u << SR_I3) | (1u << SR_I2) | (1u << SR_I1) |
+                  (1u << SR_I0);
+    } else
     env->sr = (1u << SR_MD) | (1u << SR_RB) | (1u << SR_BL) |
               (1u << SR_I3) | (1u << SR_I2) | (1u << SR_I1) | (1u << SR_I0);
     env->fpscr = FPSCR_DN | FPSCR_RM_ZERO; /* CPU reset value according to SH4 manual */
@@ -174,6 +199,10 @@ static void superh_cpu_disas_set_info(const CPUState *cpu,
                                      : BFD_ENDIAN_LITTLE;
     info->mach = bfd_mach_sh4;
     info->print_insn = print_insn_sh;
+    if (env->features & SH_FEATURE_SH2) {
+        info->mach = env->features & SH_FEATURE_NO_FPU ? bfd_mach_sh2
+                                                       : bfd_mach_sh2e;
+    }
 
     info->cap_arch = CS_ARCH_SH;
     info->cap_insn_unit = 2;
@@ -256,6 +285,37 @@ static void sh7785_class_init(ObjectClass *oc, const void *data)
     scc->pvr = 0x10300700;
     scc->prr = 0x00000200;
     scc->cvr = 0x71440211;
+}
+
+/*
+ * SH-2 family.  The SH7050/SH7051/SH7052/SH7053/SH7054 automotive parts
+ * use a plain SH-2 core; SH7055/SH7058/SH7059 use the SH-2E core with a
+ * single precision FPU.
+ */
+static void sh2_cpu_initfn(Object *obj)
+{
+    CPUSH4State *env = cpu_env(CPU(obj));
+
+    env->id = SH_CPU_SH2;
+    env->features = SH_FEATURE_SH2 | SH_FEATURE_NO_FPU;
+}
+
+static void sh2e_cpu_initfn(Object *obj)
+{
+    CPUSH4State *env = cpu_env(CPU(obj));
+
+    env->id = SH_CPU_SH2E;
+    env->features = SH_FEATURE_SH2;
+}
+
+static void sh2_class_init(ObjectClass *oc, const void *data)
+{
+    SuperHCPUClass *scc = SUPERH_CPU_CLASS(oc);
+
+    /* SH-2 has no PVR/PRR/CVR; keep them zero. */
+    scc->pvr = 0;
+    scc->prr = 0;
+    scc->cvr = 0;
 }
 
 static void superh_cpu_realizefn(DeviceState *dev, Error **errp)
@@ -373,6 +433,10 @@ static const TypeInfo superh_cpu_type_infos[] = {
                            sh7751r_cpu_initfn),
     DEFINE_SUPERH_CPU_TYPE(TYPE_SH7785_CPU, sh7785_class_init,
                            sh7785_cpu_initfn),
+    DEFINE_SUPERH_CPU_TYPE(TYPE_SH2_CPU, sh2_class_init,
+                           sh2_cpu_initfn),
+    DEFINE_SUPERH_CPU_TYPE(TYPE_SH2E_CPU, sh2_class_init,
+                           sh2e_cpu_initfn),
 
 };
 

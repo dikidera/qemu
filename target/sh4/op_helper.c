@@ -207,6 +207,11 @@ void helper_macw(CPUSH4State *env, int32_t arg0, int32_t arg1)
 
 void cpu_load_fpscr(CPUSH4State *env, uint32_t val)
 {
+    if (env->features & SH_FEATURE_SH2) {
+        /* SH-2E: single precision only, no banks, denormals flushed. */
+        val &= ~(FPSCR_FR | FPSCR_SZ | FPSCR_PR);
+        val |= FPSCR_DN;
+    }
     env->fpscr = val & FPSCR_MASK;
     if ((val & FPSCR_RM_MASK) == FPSCR_RM_ZERO) {
         set_float_rounding_mode(float_round_to_zero, &env->fp_status);

@@ -1345,6 +1345,21 @@ SRST
 ERST
 
     {
+        .name       = "ecu",
+        .args_type  = "cmd:S?",
+        .params     = "[command]",
+        .help       = "ECU engine simulator control (try 'ecu help')",
+        .cmd        = hmp_ecu,
+    },
+
+SRST
+``ecu`` [*command*]
+  Send a command to the ECU engine/vehicle simulator of the ``ecu-*``
+  machines, e.g. ``ecu set rpm 3000``, ``ecu bind map AN0``,
+  ``ecu status``.  ``ecu help`` lists all commands.
+ERST
+
+    {
         .name       = "object_add",
         .args_type  = "object:S",
         .params     = "[qom-type=]type,id=str[,prop=value][,...]",

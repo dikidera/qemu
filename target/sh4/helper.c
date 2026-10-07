@@ -26,6 +26,7 @@
 #include "exec/log.h"
 #include "accel/tcg/cpu-loop.h"
 #include "qemu/plugin.h"
+#include "accel/tcg/cpu-ldst.h"
 
 #if !defined(CONFIG_USER_ONLY)
 #include "hw/sh4/sh_intc.h"
@@ -57,9 +58,100 @@ int cpu_sh4_is_cached(CPUSH4State *env, uint32_t addr)
 
 #else /* !CONFIG_USER_ONLY */
 
+/*
+ * SH-2 exception model: SR then PC are pushed onto the R15 stack, the
+ * handler address is fetched from VBR + 4 * vector.
+ */
+static void sh2_enter_exception(CPUSH4State *env, int vec, uint32_t ret_pc)
+{
+    uint32_t sp = env->gregs[15];
+
+    sp -= 4;
+    cpu_stl_data(env, sp, cpu_read_sr(env));
+    sp -= 4;
+    cpu_stl_data(env, sp, ret_pc);
+    env->gregs[15] = sp;
+    env->pc = cpu_ldl_data(env, env->vbr + vec * 4);
+}
+
+static int sh2_exception_vector(CPUSH4State *env, int excp)
+{
+    switch (excp) {
+    case 0x180: /* general illegal instruction */
+    case 0x800: /* FPU instruction on an FPU-less SH-2 */
+        return SH2_VEC_ILLEGAL;
+    case 0x1a0: /* slot illegal instruction */
+    case 0x820:
+        return SH2_VEC_SLOT_ILLEGAL;
+    case 0x0e0: /* address errors */
+    case 0x100:
+        return SH2_VEC_CPU_ADDR_ERR;
+    case 0x120:
+        return SH2_VEC_FPU;
+    case 0x160:
+        return (env->tra >> 2) & 0xff;
+    default:
+        return -1;
+    }
+}
+
+static void sh2_cpu_do_interrupt(CPUState *cs)
+{
+    CPUSH4State *env = cpu_env(cs);
+    uint64_t last_pc = env->pc;
+    uint32_t ret_pc = env->pc;
+    int excp = cs->exception_index;
+
+    env->in_sleep = 0;
+    env->lock_addr = -1;
+
+    if (env->flags & TB_FLAG_DELAY_SLOT_MASK) {
+        /* Restart from the branch owning the delay slot. */
+        ret_pc -= 2;
+        env->flags &= ~TB_FLAG_DELAY_SLOT_MASK;
+    }
+
+    if (excp != -1) {
+        int vec = sh2_exception_vector(env, excp);
+
+        if (vec < 0) {
+            cpu_abort(cs, "SH-2: unhandled exception 0x%x", excp);
+        }
+        if (excp == 0x160) {
+            ret_pc += 2; /* TRAPA returns after the instruction */
+        }
+        qemu_log_mask(CPU_LOG_INT, "SH-2 exception 0x%03x -> vector %d "
+                      "at pc=0x%08x\n", excp, vec, ret_pc);
+        sh2_enter_exception(env, vec, ret_pc);
+        cs->exception_index = -1;
+        qemu_plugin_vcpu_exception_cb(cs, last_pc);
+        return;
+    }
+
+    if (env->sh2_irq_query) {
+        int level = 0;
+        int vec = env->sh2_irq_query(env->sh2_irq_opaque,
+                                     (env->sr >> 4) & 0xf, &level);
+        if (vec < 0) {
+            return;
+        }
+        qemu_log_mask(CPU_LOG_INT, "SH-2 interrupt vector %d level %d "
+                      "at pc=0x%08x\n", vec, level, ret_pc);
+        sh2_enter_exception(env, vec, ret_pc);
+        env->sr = (env->sr & ~(0xf << 4)) | ((level & 0xf) << 4);
+        qemu_plugin_vcpu_interrupt_cb(cs, last_pc);
+    }
+}
+
 void superh_cpu_do_interrupt(CPUState *cs)
 {
     CPUSH4State *env = cpu_env(cs);
+
+    if (env->features & SH_FEATURE_SH2) {
+        sh2_cpu_do_interrupt(cs);
+        return;
+    }
+    {
     int do_irq = cpu_test_interrupt(cs, CPU_INTERRUPT_HARD);
     int do_exp, irq_vector = cs->exception_index;
     uint64_t last_pc = env->pc;
@@ -188,6 +280,7 @@ void superh_cpu_do_interrupt(CPUState *cs)
         env->pc = env->vbr + 0x600;
         qemu_plugin_vcpu_interrupt_cb(cs, last_pc);
         return;
+    }
     }
 }
 
@@ -401,6 +494,13 @@ static int get_physical_address(CPUSH4State *env, hwaddr* physical,
                                 int *prot, vaddr address,
                                 MMUAccessType access_type)
 {
+    if (env->features & SH_FEATURE_SH2) {
+        /* SH-2 has a flat 32-bit physical address space. */
+        *physical = address;
+        *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+        return MMU_OK;
+    }
+
     /* P1, P2 and P4 areas do not use translation */
     if ((address >= 0x80000000 && address < 0xc0000000) || address >= 0xe0000000) {
         if (!(env->sr & (1u << SR_MD))
@@ -787,9 +887,22 @@ int cpu_sh4_is_cached(CPUSH4State *env, uint32_t addr)
 bool superh_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     if (interrupt_request & CPU_INTERRUPT_HARD) {
+        CPUSH4State *env = cpu_env(cs);
+
         /* Delay slots are indivisible, ignore interrupts */
-        if (cpu_env(cs)->flags & TB_FLAG_DELAY_SLOT_MASK) {
+        if (env->flags & TB_FLAG_DELAY_SLOT_MASK) {
             return false;
+        } else if (env->features & SH_FEATURE_SH2) {
+            int level;
+
+            if (!env->sh2_irq_query ||
+                env->sh2_irq_query(env->sh2_irq_opaque,
+                                   (env->sr >> 4) & 0xf, &level) < 0) {
+                return false;
+            }
+            cs->exception_index = -1;
+            sh2_cpu_do_interrupt(cs);
+            return true;
         } else {
             superh_cpu_do_interrupt(cs);
             return true;

@@ -8,6 +8,7 @@ source char/Kconfig
 source core/Kconfig
 source display/Kconfig
 source dma/Kconfig
+source ecu/Kconfig
 source fsi/Kconfig
 source gpio/Kconfig
 source hyperv/Kconfig
