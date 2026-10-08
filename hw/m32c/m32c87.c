@@ -782,6 +782,25 @@ static void port_drive(M32C87State *s, int n)
     }
 }
 
+/*
+ * Key input interrupt: KI0..KI3 are P10_4..P10_7; a falling edge on any
+ * of them while the pin is an input requests the KUPIC interrupt.
+ */
+#define KUPIC_VEC   M32C87_VEC_KEY
+
+static void key_in_cb(void *opaque, int level)
+{
+    PinCtx *p = opaque;
+    M32C87State *s = p->s;
+    int b = p->n;
+    bool input = !(s->regs[port_p[10] + 2] & (1 << b));
+
+    if (input && s->key_level[b - 4] && !level) {
+        m32c87_set_ir(s, KUPIC_VEC);
+    }
+    s->key_level[b - 4] = level;
+}
+
 /* ---------------------------------------------------------------------- */
 /* CAN                                                                    */
 /* ---------------------------------------------------------------------- */
@@ -1495,6 +1514,14 @@ static void m32c87_realize(DeviceState *dev, Error **errp)
             snprintf(name, sizeof(name), "P%d_%d", n, b);
             s->port_pin[n][b] = ecu_pin(name);
         }
+    }
+    for (int b = 4; b < 8; b++) {
+        PinCtx *p = g_new(PinCtx, 1);
+
+        p->s = s;
+        p->n = b;
+        s->key_level[b - 4] = ecu_pin_level(s->port_pin[10][b]);
+        ecu_pin_set_input_handler(s->port_pin[10][b], key_in_cb, p);
     }
 
     for (int i = 0; i < M32C87_NUM_UART; i++) {

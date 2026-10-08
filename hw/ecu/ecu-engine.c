@@ -754,6 +754,18 @@ static double btdc(EcuEngineState *s, int cyl, double a)
     return d > 360.0 ? d - 720.0 : d;
 }
 
+/*
+ * Spark advance of @cyl.  A coil can fire once per cycle (coil on plug)
+ * or every revolution (wasted spark, or no cam signal), so the spark is
+ * referred to the nearest compression or exhaust TDC: (-180, 180].
+ */
+static double spark_btdc(EcuEngineState *s, int cyl, double a)
+{
+    double d = fmod(btdc(s, cyl, a) + 720.0, 360.0);
+
+    return d > 180.0 ? d - 360.0 : d;
+}
+
 static double active_level(EcuEngineState *s, int sig)
 {
     if (sig >= SIG_INJ1 && sig < SIG_INJ1 + ECU_MAX_CYL) {
@@ -1023,7 +1035,8 @@ static void cmd_status(EcuEngineState *s, EcuOutputFn out, void *op)
         }
         if (s->bound[SIG_IGN1 + i]) {
             g_string_append_printf(str, " ign adv=%.1fbtdc dwell=%.2fms n=%"
-                                   PRIu64, btdc(s, i, ign->last_angle_off),
+                                   PRIu64,
+                                   spark_btdc(s, i, ign->last_angle_off),
                                    ign->last_width_ms, ign->count);
         }
         out(op, str->str);

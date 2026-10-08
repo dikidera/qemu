@@ -131,6 +131,7 @@ typedef struct M32C87State {
 
     /* INT pins */
     int int_level[6];
+    int key_level[4];               /* KI0..KI3 = P10_4..P10_7 */
     int nmi_level;
     bool nmi_pending;
 

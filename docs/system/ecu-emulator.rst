@@ -68,7 +68,8 @@ Peripheral clock
 ~~~~~~~~~~~~~~~~
 
 Baud rates and timer rates depend on the peripheral clock, which differs
-between ECUs.  The defaults are 20 MHz (SH705x) and 32 MHz (M32C/87);
+between ECUs.  The defaults are 20 MHz (SH705x; this is what npkern, which runs
+on these ECUs, assumes for its SCI and ATU settings) and 32 MHz (M32C/87);
 change them with ``-global sh705x-soc.pclk-hz=...`` or
 ``-global m32c87-soc.pclk-hz=...``.  A quick way to find the right value
 is the SCI/UART bit rate register the firmware programs for its K-line
@@ -142,8 +143,10 @@ Engine model
   spark with a burnable mixture, cranks at 250 rpm while ``start_sw`` is
   on, and rises with throttle.
 * Status shows per cylinder the injector pulse width and end of
-  injection, and the ignition advance (degrees BTDC at the end of dwell)
-  and dwell.
+  injection (degrees BTDC of the compression TDC, -360..360), and the
+  ignition advance (degrees BTDC at the end of dwell, referred to the
+  nearest TDC of that cylinder so wasted-spark coils read the same as
+  coil-on-plug, -180..180) and dwell.
 
 Controlling the simulator
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -210,7 +213,10 @@ Model fidelity and limitations
 SH-2/SH-2E core
   Built on QEMU's SH-4 translator: flat address space, SH-2 exception
   model (SR/PC stacked, vectors via VBR, RTE), interrupt priority masks,
-  FPU-less SH-2 traps FPU opcodes, SH-2E single precision FPU.
+  FPU-less SH-2 traps FPU opcodes, SH-2E single precision FPU (SH-4 only
+  FPU instructions such as FSQRT, FIPR, FTRV, FSCHG, FRCHG and the double
+  conversions are illegal instructions).  NMI and edge-detected IRQn
+  requests are cleared when the CPU accepts them.
 
 SH705x peripherals
   Register addresses, vector numbers and bit layouts come from the
@@ -233,13 +239,25 @@ M32C/80 core
 M32C/87 peripherals
   Interrupt control registers, timers A (timer, event, one-shot, PWM) and
   B (timer, event, period/pulse width measurement), A/D0, UART0-4 (UART
-  mode), ports, INT/NMI pins, watchdog, CAN0/CAN1.  The CAN register
-  layout (``can_layout`` in ``hw/m32c/m32c87.c``) and the CAN interrupt
-  vectors (``-global m32c87-soc.can0-vec=...``) are best-effort guesses
-  and should be checked against the M32C/87 hardware manual; the UART0/1
-  base addresses and the interrupt control register table are also worth
-  verifying for a given part.  Intelligent I/O, DMAC, three-phase motor
-  control and the D/A converter are not modelled.
+  mode), ports, INT/NMI pins, key input interrupt (KI0-KI3 on
+  P10_4-P10_7), watchdog, CAN0/CAN1.  Core SFR addresses
+  follow Ghidra's M16C_80 processor definition; the M32C/87 specific ones
+  (UART0 at 0364h, UART1 at 02E4h, FMR0/FMR1 at 0057h/0055h, the CAN
+  register map and the CAN interrupt control registers) were checked
+  against the M32C/87 SFR table.  CAN interrupts 0..5 share the
+  interrupt control registers of intelligent I/O interrupts 9, 10, 11, 0,
+  1 and 5 and set bit 7 of the matching ``IIOnIR``.  Which CAN interrupt
+  a slot or error event uses could not be confirmed without the hardware
+  manual (REJ09B0180); it is set with ``-global m32c87-soc.can0-irq=N``,
+  ``can0-err-irq``, ``can1-irq``, ``can1-err-irq`` (defaults 0, 2, 1, 2).
+  The bit position of ``BANKSEL`` in ``CiCTLR1`` (bit 3) is likewise
+  unconfirmed.  Received characters are held back until the firmware
+  reads the receive buffer, so the UART error flags (overrun, framing,
+  parity) never set.  Not modelled: timer trigger select (``TRGSR``),
+  two-phase pulse mode, intelligent I/O, DMAC, flash
+  programming (CPU rewrite mode), clock/PLL and protect registers
+  (``PRCR`` writes are not enforced), clock synchronous and I2C UART
+  modes, the D/A converter and three-phase motor control.
 
 General
   Timing is driven by QEMU's virtual clock, not by instruction counts, so
@@ -257,8 +275,9 @@ Debugging
 * ``-d int`` logs every exception/interrupt with its vector, ``-d
   guest_errors,unimp`` reports accesses to unmodelled registers.
 * ``-s -S`` starts the gdbstub.  For the SH705x use an ``sh-elf`` gdb
-  (``set architecture sh2e``).  The M32C gdbstub exposes r0-r3, a0, a1,
-  fb, sb, usp, isp, pc, intb and flg.
+  (``set architecture sh2e``).  The M32C gdbstub uses the raw register
+  layout of GDB's ``m32c`` target (both register banks, control and DMA
+  registers), so ``m32c-elf-gdb`` can connect directly.
 
 Tests
 -----
