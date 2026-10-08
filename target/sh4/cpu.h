@@ -161,6 +161,12 @@ enum sh_features {
  */
 typedef int (*SH2IrqQueryFn)(void *opaque, int imask, int *level);
 
+/*
+ * Called when the CPU starts exception handling for interrupt @vec, so
+ * the controller can clear edge-triggered sources (NMI, IRQn in edge mode).
+ */
+typedef void (*SH2IrqAckFn)(void *opaque, int vec);
+
 typedef struct memory_content {
     uint32_t address;
     uint32_t value;
@@ -232,6 +238,7 @@ typedef struct CPUArchState {
 
     void *intc_handle;
     SH2IrqQueryFn sh2_irq_query;   /* SH-2: SoC interrupt controller */
+    SH2IrqAckFn sh2_irq_ack;
     void *sh2_irq_opaque;
     int in_sleep;               /* SR_BL ignored during sleep */
     memory_content *movcal_backup;

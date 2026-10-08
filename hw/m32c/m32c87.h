@@ -86,16 +86,14 @@ typedef struct M32C87UART {
 typedef struct M32C87CAN {
     struct M32C87State *soc;
     int index;
-    uint16_t base;
     CanBusClientState bus_client;
     CanBusState *canbus;
-    uint16_t ctlr, str, sstr, icr, idr, conr, tsr;
-    uint8_t recr, tecr, sbs;
+    uint16_t ctlr0, str, idr, conr, tsr, sistr, simkr, ssctlr, ssstr, afs;
+    uint8_t ctlr1, slpr, sbs, recr, tecr, eimkr, eistr, efr, mdr;
     uint8_t mctl[M32C87_CAN_SLOTS];
     uint8_t slot[M32C87_CAN_SLOTS][16];
-    uint8_t gmr[6], lmar[6], lmbr[6];
-    uint8_t misc[0x20];
-    int vec_trx, vec_err;
+    uint8_t gmr[5], lmar[5], lmbr[5];
+    int irq_slot, irq_err;      /* CAN interrupt numbers 0..5 */
 } M32C87CAN;
 
 typedef struct M32C87State {
@@ -107,7 +105,7 @@ typedef struct M32C87State {
     uint32_t avref_mv;
     bool wdt_reset;
     bool kline_echo;
-    uint32_t can_vec[M32C87_NUM_CAN][2];
+    uint32_t can_irq[M32C87_NUM_CAN][2];
     CanBusState *canbus[M32C87_NUM_CAN];
 
     M32CCPU *cpu;

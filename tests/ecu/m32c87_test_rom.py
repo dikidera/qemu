@@ -68,19 +68,24 @@ a.mov_b_imm(0x02, ABS16(0x035b))
 a.mov_b_imm(0x06, ABS16(0x0094))
 a.mov_b_imm(0x23, ABS16(0x0340))       # TABSR: TA0, TA1, TB0
 
-# CAN0: leave reset, slot 0 = std id 0x123, 8 bytes, transmit
+# CAN0: exit sleep (C0SLPR), leave reset (C0CTLR0), slot 0 = std id
+# 0x123, 8 bytes, transmit
+a.mov_b_imm(0x01, ABS16(0x0242))
 a.mov_w_imm(0x0000, ABS16(0x0200))
-a.mov_b_imm(0x00, ABS16(0x0220))       # slot buffer select: slot 0
+a.mov_b_imm(0x00, ABS16(0x0240))       # C0SBS: slot 0 in buffer 0
 a.mov_b_imm(0x123 >> 6, ABS16(0x01e0))
 a.mov_b_imm(0x123 & 0x3f, ABS16(0x01e1))
 a.mov_b_imm(8, ABS16(0x01e5))
 for i, ch in enumerate(b'QEMU-M32'):
     a.mov_b_imm(ch, ABS16(0x01e6 + i))
 # CAN1 (base 0x0280, slot window 0x0260): slot 0 receives std id 0x123
+a.mov_b_imm(0x01, ABS16(0x0252))       # C1SLPR: exit sleep
 a.mov_w_imm(0x0000, ABS16(0x0280))
-a.mov_b_imm(0x00, ABS16(0x02a0))       # C1SBS
-for i in range(6):
+a.mov_b_imm(0x00, ABS16(0x0250))       # C1SBS
+a.mov_b_imm(0x08, ABS16(0x0251))       # C1CTLR1: BANKSEL = 1
+for i in range(5):
     a.mov_b_imm(0xff, ABS16(0x02a8 + i))   # C1GMR: compare all bits
+a.mov_b_imm(0x00, ABS16(0x0251))       # BANKSEL = 0: C1MCTLj
 a.mov_b_imm(0x123 >> 6, ABS16(0x0260))
 a.mov_b_imm(0x123 & 0x3f, ABS16(0x0261))
 a.mov_b_imm(0x40, ABS16(0x02b0))       # C1MCTL0: RECREQ

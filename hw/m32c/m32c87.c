@@ -3,10 +3,11 @@
  *
  * SFR addresses follow the M32C/80 series layout (interrupt control
  * registers, timers, UART2-4, ports and A/D0 match Ghidra's M16C_80
- * processor definition).  The CAN module register layout and the CAN
- * interrupt vector numbers are best effort; they are collected in
- * can_layout/m32c87_icr_map below so they can be adjusted against the
- * M32C/87 hardware manual.
+ * processor definition).  The M32C/87 specific addresses (UART0 at 0364h,
+ * UART1 at 02E4h, FMR0/FMR1 at 0057h/0055h, the CAN0/CAN1 register map
+ * and the CAN interrupt control registers) come from the M32C/87 group
+ * SFR table (REJ03B0127 / REJ09B0180).  Details that need the full
+ * hardware manual are called out where they are used.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -45,6 +46,7 @@ static uint16_t rd16(M32C87State *s, uint32_t a)
 #define ICR_POL     0x10
 #define ICR_LVS     0x20
 #define RLVL_ADDR   0x009f
+#define FMR0_ADDR   0x0057      /* M32C/87; FMR1 is at 0055h */
 #define RLVL_FSIT   0x08
 
 static const struct { int vec; uint16_t icr; } m32c87_icr_map[] = {
@@ -63,9 +65,8 @@ static const struct { int vec; uint16_t icr; } m32c87_icr_map[] = {
     { 42, 0x73 }, { 43, 0x93 },                               /* AD0, KEY */
     { 44, 0x75 }, { 45, 0x95 }, { 46, 0x77 }, { 47, 0x97 },   /* IIO0-3 */
     { 48, 0x79 }, { 49, 0x99 }, { 50, 0x7b }, { 51, 0x9b },   /* IIO4-7 */
-    { 52, 0x7d }, { 53, 0x9d }, { 54, 0x7f },                 /* IIO8-10 */
-    /* best effort: IIO11 / CAN interrupt control registers */
-    { 57, 0x81 }, { 58, 0x83 }, { 59, 0x85 }, { 60, 0x87 },
+    { 52, 0x7d }, { 53, 0x9d }, { 54, 0x7f }, { 55, 0x81 },   /* IIO8-11 */
+    /* CAN0..5 interrupts share IIO9IC, IIO10IC, IIO11IC, IIO0IC, IIO1IC, IIO5IC */
 };
 
 static void m32c87_update_irq(M32C87State *s)
@@ -786,29 +787,111 @@ static void port_drive(M32C87State *s, int n)
 /* ---------------------------------------------------------------------- */
 
 /*
- * Register layout relative to the channel base (best effort):
- *   +0x00 CiCTLR  +0x02 CiSTR  +0x04 CiSSTR  +0x06 CiICR  +0x08 CiIDR
- *   +0x0a CiCONR  +0x0c CiRECR +0x0d CiTECR  +0x0e CiTSR
- *   +0x20 CiSBS   +0x28 CiGMR (6)  +0x30 CiMCTL0..15  +0x40 CiLMAR (6)
- *   +0x50 CiLMBR (6)
- * Slot buffer windows (selected by CiSBS) at win and win + 0x10.
+ * M32C/87 CAN module register map (M32C/87 group SFR table, REJ09B0180;
+ * CAN1 = CAN0 + 0x80 except the SBS/CTLR1 block which is at +0x10):
+ *   01E0h / 01F0h  slot buffer 0 / 1 (C0SLOT0_x, C0SLOT1_x), slot from C0SBS
+ *   0200h C0CTLR0  0202h C0STR   0204h C0IDR   0206h C0CONR  0208h C0TSR
+ *   020Ah C0TEC    020Bh C0REC   020Ch C0SISTR 0210h C0SIMKR
+ *   0214h C0EIMKR  0215h C0EISTR 0216h C0EFR   0219h C0MDR
+ *   BANKSEL = 0: 0220h C0SSCTLR 0224h C0SSSTR 0230h..023Fh C0MCTL0..15
+ *   BANKSEL = 1: 0228h C0GMR    0230h C0LMAR  0238h C0LMBR
+ *   0240h C0SBS    0241h C0CTLR1 0242h C0SLPR  0244h C0AFS
+ * The CAN interrupts are CAN interrupt 0..5, which share the interrupt
+ * control registers of intelligent I/O interrupts 9, 10, 11, 0, 1, 5;
+ * the request flag is bit 7 of the matching IIOnIR register.
+ *
+ * Not available in public excerpts (M32C/87 hardware manual chapter 23 is
+ * needed): the exact bit position of BANKSEL in CiCTLR1 (bit 3 assumed),
+ * and which CAN interrupt number each event (slot, error, wake-up) is
+ * routed to.  The routing is therefore configurable through the
+ * "canN-irq"/"canN-err-irq" properties (CAN interrupt numbers 0..5).
  */
-static const struct { uint16_t base, win; } can_layout[M32C87_NUM_CAN] = {
-    { 0x0200, 0x01e0 },
-    { 0x0280, 0x0260 },
+static const struct {
+    uint16_t win, base, sbs;
+} can_layout[M32C87_NUM_CAN] = {
+    { 0x01e0, 0x0200, 0x0240 },
+    { 0x0260, 0x0280, 0x0250 },
 };
 
-#define CTLR_RESET      0x0001
-#define CTLR_LOOPBACK   0x0002
+/* CAN interrupt n -> software interrupt number, IIOnIR, IIOnIE */
+static const struct {
+    uint8_t vec;
+    uint16_t ir, ie;
+} can_int[6] = {
+    { 53, 0x00a9, 0x00b9 },     /* CAN0IC = IIO9IC  (009Dh) */
+    { 54, 0x00aa, 0x00ba },     /* CAN1IC = IIO10IC (007Fh) */
+    { 55, 0x00ab, 0x00bb },     /* CAN2IC = IIO11IC (0081h) */
+    { 44, 0x00a0, 0x00b0 },     /* CAN3IC = IIO0IC  (0075h) */
+    { 45, 0x00a1, 0x00b1 },     /* CAN4IC = IIO1IC  (0095h) */
+    { 49, 0x00a5, 0x00b5 },     /* CAN5IC = IIO5IC  (0099h) */
+};
+#define IIO_CAN_REQ     0x80
+#define IIOIE_IRLT      0x01
+
+#define CTLR0_RESET0    0x0001
+#define CTLR0_LOOPBACK  0x0002
+#define CTLR0_BASICCAN  0x0008
+#define CTLR0_RESET1    0x0010
+#define CTLR0_TSRESET   0x0400
+#define CTLR0_ECRESET   0x0800
+#define CTLR1_BANKSEL   0x08
+#define SLPR_SLEEP      0x01
 #define STR_TRMSUCC     0x0010
 #define STR_RECSUCC     0x0020
 #define STR_RESET       0x0100
-#define MCTL_NEWDATA    0x01
-#define MCTL_TRMACTIVE  0x02
+#define STR_LOOPBACK    0x0200
+#define STR_BASICCAN    0x0800
+#define MCTL_NEWDATA    0x01    /* SENTDATA when transmitting */
+#define MCTL_TRMACTIVE  0x02    /* INVALDATA when receiving */
 #define MCTL_MSGLOST    0x04
 #define MCTL_REMOTE     0x20
 #define MCTL_RECREQ     0x40
 #define MCTL_TRMREQ     0x80
+
+static bool can_in_reset(M32C87CAN *c)
+{
+    return (c->ctlr0 & (CTLR0_RESET0 | CTLR0_RESET1)) ||
+           !(c->slpr & SLPR_SLEEP);
+}
+
+static void can_update_str(M32C87CAN *c)
+{
+    c->str &= ~(STR_RESET | STR_LOOPBACK | STR_BASICCAN);
+    if (can_in_reset(c)) {
+        c->str |= STR_RESET;
+    }
+    if (c->ctlr0 & CTLR0_LOOPBACK) {
+        c->str |= STR_LOOPBACK;
+    }
+    if (c->ctlr0 & CTLR0_BASICCAN) {
+        c->str |= STR_BASICCAN;
+    }
+}
+
+/* Raise CAN interrupt number @n (0..5) */
+static void can_raise(M32C87State *s, int n)
+{
+    uint8_t ie;
+
+    if (n < 0 || n >= ARRAY_SIZE(can_int)) {
+        return;
+    }
+    s->regs[can_int[n].ir] |= IIO_CAN_REQ;
+    ie = s->regs[can_int[n].ie];
+    /*
+     * With IRLT = 1 the request reaches the interrupt control register only
+     * when the source is enabled in IIOnIE; with IRLT = 0 the IIOnIR flags
+     * are used for DMA/polling and the request goes straight to the ICR.
+     */
+    if (!(ie & IIOIE_IRLT) || (ie & IIO_CAN_REQ)) {
+        m32c87_set_ir(s, can_int[n].vec);
+    }
+}
+
+static uint16_t can_timestamp(M32C87CAN *c)
+{
+    return c->tsr;
+}
 
 static void can_slot_to_frame(M32C87CAN *c, int n, qemu_can_frame *f)
 {
@@ -829,25 +912,36 @@ static void can_slot_to_frame(M32C87CAN *c, int n, qemu_can_frame *f)
     memcpy(f->data, &b[6], 8);
 }
 
-static void can_irq(M32C87CAN *c, int slot)
+static void can_slot_done(M32C87CAN *c, int n)
 {
-    if (c->icr & (1 << slot)) {
-        m32c87_set_ir(c->soc, c->vec_trx);
+    c->sistr |= 1 << n;
+    if (c->simkr & (1 << n)) {
+        can_raise(c->soc, c->irq_slot);
     }
 }
+
+static void can_rx_frame(M32C87CAN *c, const qemu_can_frame *f);
 
 static void can_transmit(M32C87CAN *c, int n)
 {
     qemu_can_frame f;
+    uint16_t ts = can_timestamp(c);
 
     can_slot_to_frame(c, n, &f);
-    if (c->canbus) {
+    if (c->ctlr0 & CTLR0_LOOPBACK) {
+        can_rx_frame(c, &f);
+    } else if (c->canbus) {
         can_bus_client_send(&c->bus_client, &f, 1);
     }
-    c->mctl[n] = (c->mctl[n] & ~MCTL_TRMACTIVE) | MCTL_NEWDATA;
-    c->sstr |= 1 << n;
+    c->slot[n][14] = ts >> 8;
+    c->slot[n][15] = ts;
+    c->mctl[n] = (c->mctl[n] & ~(MCTL_TRMACTIVE | MCTL_TRMREQ)) |
+                 MCTL_NEWDATA;
+    if (c->ssctlr & (1 << n)) {
+        c->ssstr |= 1 << n;
+    }
     c->str = (c->str & ~0x0f) | n | STR_TRMSUCC;
-    can_irq(c, n);
+    can_slot_done(c, n);
 }
 
 static bool can_match(M32C87CAN *c, int n, const qemu_can_frame *f)
@@ -875,6 +969,7 @@ static bool can_match(M32C87CAN *c, int n, const qemu_can_frame *f)
 static void can_rx_frame(M32C87CAN *c, const qemu_can_frame *f)
 {
     bool rtr = f->can_id & QEMU_CAN_RTR_FLAG;
+    uint16_t ts = can_timestamp(c);
 
     for (int n = 0; n < M32C87_CAN_SLOTS; n++) {
         uint8_t *b = c->slot[n];
@@ -901,10 +996,11 @@ static void can_rx_frame(M32C87CAN *c, const qemu_can_frame *f)
         b[5] = MIN(f->can_dlc, 8);
         memset(&b[6], 0, 8);
         memcpy(&b[6], f->data, MIN(f->can_dlc, 8));
+        b[14] = ts >> 8;
+        b[15] = ts;
         c->mctl[n] |= MCTL_NEWDATA;
-        c->sstr |= 1 << n;
         c->str = (c->str & ~0x0f) | n | STR_RECSUCC;
-        can_irq(c, n);
+        can_slot_done(c, n);
         return;
     }
 }
@@ -913,7 +1009,7 @@ static bool can_can_receive(CanBusClientState *client)
 {
     M32C87CAN *c = container_of(client, M32C87CAN, bus_client);
 
-    return !(c->ctlr & CTLR_RESET);
+    return !can_in_reset(c);
 }
 
 static ssize_t can_receive(CanBusClientState *client,
@@ -921,7 +1017,7 @@ static ssize_t can_receive(CanBusClientState *client,
 {
     M32C87CAN *c = container_of(client, M32C87CAN, bus_client);
 
-    if (c->ctlr & CTLR_RESET) {
+    if (can_in_reset(c) || (c->mdr & 0x03) == 0x03) {
         return n;
     }
     for (size_t i = 0; i < n; i++) {
@@ -938,13 +1034,67 @@ static CanBusClientInfo m32c87_can_info = {
     .receive = can_receive,
 };
 
+static void can_reset(M32C87CAN *c)
+{
+    c->ctlr0 = CTLR0_RESET0 | CTLR0_RESET1;
+    c->ctlr1 = 0;
+    c->slpr = 0;
+    c->str = STR_RESET;
+    c->idr = c->conr = c->tsr = 0;
+    c->sistr = c->simkr = 0;
+    c->eimkr = c->eistr = c->efr = c->mdr = 0;
+    c->ssctlr = c->ssstr = c->afs = 0;
+    c->recr = c->tecr = c->sbs = 0;
+    memset(c->mctl, 0, sizeof(c->mctl));
+    memset(c->slot, 0, sizeof(c->slot));
+    memset(c->gmr, 0, sizeof(c->gmr));
+    memset(c->lmar, 0, sizeof(c->lmar));
+    memset(c->lmbr, 0, sizeof(c->lmbr));
+}
+
+static void can_write_mctl(M32C87CAN *c, int n, uint8_t v)
+{
+    /* NEWDATA/SENTDATA and MSGLOST are cleared by writing 0 */
+    c->mctl[n] = (v & 0xf8) | (c->mctl[n] & v & 0x05) |
+                 (c->mctl[n] & MCTL_TRMACTIVE);
+    if (!(v & (MCTL_TRMREQ | MCTL_RECREQ))) {
+        c->mctl[n] &= ~MCTL_TRMACTIVE;
+    }
+    if ((v & MCTL_TRMREQ) && !can_in_reset(c) &&
+        !(c->mctl[n] & MCTL_TRMACTIVE)) {
+        c->mctl[n] |= MCTL_TRMACTIVE;
+        can_transmit(c, n);
+    }
+}
+
+static bool can_reg16(M32C87CAN *c, uint32_t o, uint16_t **r)
+{
+    switch (o & ~1) {
+    case 0x00: *r = &c->ctlr0; return true;
+    case 0x02: *r = &c->str; return true;
+    case 0x04: *r = &c->idr; return true;
+    case 0x06: *r = &c->conr; return true;
+    case 0x08: *r = &c->tsr; return true;
+    case 0x0c: *r = &c->sistr; return true;
+    case 0x10: *r = &c->simkr; return true;
+    }
+    if (!(c->ctlr1 & CTLR1_BANKSEL)) {
+        switch (o & ~1) {
+        case 0x20: *r = &c->ssctlr; return true;
+        case 0x24: *r = &c->ssstr; return true;
+        }
+    }
+    return false;
+}
+
 static bool can_access(M32C87State *s, uint32_t a, bool write, uint8_t v,
                        uint8_t *ret)
 {
     for (int i = 0; i < M32C87_NUM_CAN; i++) {
         M32C87CAN *c = &s->can[i];
+        uint8_t *r8 = NULL;
+        uint16_t *r16;
         uint32_t o;
-        uint16_t *r16 = NULL;
 
         if (a >= can_layout[i].win && a < can_layout[i].win + 0x20) {
             /* slot buffer windows */
@@ -958,109 +1108,122 @@ static bool can_access(M32C87State *s, uint32_t a, bool write, uint8_t v,
             }
             return true;
         }
-        if (a < c->base || a >= c->base + 0x60) {
+        if (a >= can_layout[i].sbs && a < can_layout[i].sbs + 6) {
+            o = a - can_layout[i].sbs;
+            switch (o) {
+            case 0: r8 = &c->sbs; break;
+            case 1: r8 = &c->ctlr1; break;
+            case 2: r8 = &c->slpr; break;
+            case 4: case 5: {
+                int sh = (o & 1) * 8;
+                if (write) {
+                    c->afs = (c->afs & ~(0xff << sh)) | (v << sh);
+                } else {
+                    *ret = c->afs >> sh;
+                }
+                return true;
+            }
+            default:
+                if (!write) {
+                    *ret = 0;
+                }
+                return true;
+            }
+            if (write) {
+                *r8 = v;
+                if (r8 == &c->slpr) {
+                    can_update_str(c);
+                }
+            } else {
+                *ret = *r8;
+            }
+            return true;
+        }
+        if (a < can_layout[i].base || a >= can_layout[i].base + 0x40) {
             continue;
         }
-        o = a - c->base;
-        switch (o & ~1) {
-        case 0x00: r16 = &c->ctlr; break;
-        case 0x02: r16 = &c->str; break;
-        case 0x04: r16 = &c->sstr; break;
-        case 0x06: r16 = &c->icr; break;
-        case 0x08: r16 = &c->idr; break;
-        case 0x0a: r16 = &c->conr; break;
-        case 0x0e: r16 = &c->tsr; break;
-        }
-        if (r16) {
+        o = a - can_layout[i].base;
+
+        if (can_reg16(c, o, &r16)) {
             int sh = (o & 1) * 8;
+            uint16_t m = 0xff << sh;
             if (!write) {
-                *ret = *r16 >> sh;
-                return true;
-            }
-            if ((o & ~1) == 0x02) {
-                return true;                /* status: read only */
-            }
-            if ((o & ~1) == 0x04) {
-                *r16 &= ~(v << sh);         /* SSTR: write 1 clears */
-                return true;
-            }
-            *r16 = (*r16 & ~(0xff << sh)) | (v << sh);
-            if ((o & ~1) == 0x00) {
-                if (c->ctlr & CTLR_RESET) {
-                    c->str |= STR_RESET;
+                if (r16 == &c->tsr) {
+                    *ret = can_timestamp(c) >> sh;
                 } else {
-                    c->str &= ~STR_RESET;
+                    *ret = *r16 >> sh;
                 }
-            }
-            return true;
-        }
-        if (o == 0x0c || o == 0x0d) {
-            uint8_t *r = o == 0x0c ? &c->recr : &c->tecr;
-            if (write) {
-                *r = v;
-            } else {
-                *ret = *r;
-            }
-            return true;
-        }
-        if (o == 0x20) {
-            if (write) {
-                c->sbs = v;
-            } else {
-                *ret = c->sbs;
-            }
-            return true;
-        }
-        if (o >= 0x28 && o < 0x2e) {
-            if (write) {
-                c->gmr[o - 0x28] = v;
-            } else {
-                *ret = c->gmr[o - 0x28];
-            }
-            return true;
-        }
-        if (o >= 0x30 && o < 0x40) {
-            int n = o - 0x30;
-            if (!write) {
-                *ret = c->mctl[n];
                 return true;
             }
-            /* status bits are cleared by writing 0 */
-            c->mctl[n] = (v & 0xf8) | (c->mctl[n] & v & 0x07);
-            if (!(v & MCTL_NEWDATA)) {
-                c->sstr &= ~(1 << n);
+            if (r16 == &c->str) {
+                return true;                    /* read only */
             }
-            if ((v & MCTL_TRMREQ) && !(c->ctlr & CTLR_RESET)) {
-                c->mctl[n] |= MCTL_TRMACTIVE;
-                can_transmit(c, n);
+            if (r16 == &c->sistr || r16 == &c->ssstr) {
+                /* status flags: cleared by writing 0 */
+                *r16 &= ~m | (v << sh);
+                return true;
+            }
+            *r16 = (*r16 & ~m) | (v << sh);
+            if (r16 == &c->ctlr0) {
+                if (c->ctlr0 & CTLR0_TSRESET) {
+                    c->tsr = 0;
+                    c->ctlr0 &= ~CTLR0_TSRESET;
+                }
+                if (c->ctlr0 & CTLR0_ECRESET) {
+                    c->tecr = c->recr = 0;
+                    c->ctlr0 &= ~CTLR0_ECRESET;
+                }
+                can_update_str(c);
             }
             return true;
         }
-        if (o >= 0x40 && o < 0x46) {
+
+        if (!(c->ctlr1 & CTLR1_BANKSEL) && o >= 0x30 && o < 0x40) {
+            int n = o - 0x30;
             if (write) {
-                c->lmar[o - 0x40] = v;
+                can_write_mctl(c, n, v);
             } else {
-                *ret = c->lmar[o - 0x40];
+                *ret = c->mctl[n];
             }
             return true;
         }
-        if (o >= 0x50 && o < 0x56) {
+        if (c->ctlr1 & CTLR1_BANKSEL) {
+            if (o >= 0x28 && o < 0x2d) {
+                r8 = &c->gmr[o - 0x28];
+            } else if (o >= 0x30 && o < 0x35) {
+                r8 = &c->lmar[o - 0x30];
+            } else if (o >= 0x38 && o < 0x3d) {
+                r8 = &c->lmbr[o - 0x38];
+            }
+        }
+        switch (o) {
+        case 0x0a: r8 = &c->tecr; break;
+        case 0x0b: r8 = &c->recr; break;
+        case 0x14: r8 = &c->eimkr; break;
+        case 0x15:
             if (write) {
-                c->lmbr[o - 0x50] = v;
+                c->eistr &= v;          /* cleared by writing 0 */
             } else {
-                *ret = c->lmbr[o - 0x50];
+                *ret = c->eistr;
             }
             return true;
+        case 0x16: r8 = &c->efr; break;
+        case 0x19: r8 = &c->mdr; break;
         }
-        if (o >= 0x10 && o < 0x20) {
+        if (r8) {
             if (write) {
-                c->misc[o - 0x10] = v;
+                if (r8 != &c->tecr && r8 != &c->recr) {
+                    *r8 = v;
+                }
             } else {
-                *ret = c->misc[o - 0x10];
+                *ret = *r8;
             }
             return true;
         }
-        return false;
+        if (!write) {
+            *ret = 0;
+        }
+        return true;
     }
     return false;
 }
@@ -1227,7 +1390,7 @@ static void m32c87_reset_hold(Object *obj, ResetType type)
     M32C87State *s = M32C87_SOC(obj);
 
     memset(s->regs, 0, sizeof(s->regs));
-    s->regs[0x0377] = 0x01;             /* FMR0: flash ready */
+    s->regs[FMR0_ADDR] = 0x01;          /* FMR0: RDY, flash ready */
     s->nmi_pending = s->wdt_pending = false;
     s->wdt_running = false;
     timer_del(s->wdt_timer);
@@ -1254,13 +1417,7 @@ static void m32c87_reset_hold(Object *obj, ResetType type)
         timer_del(u->rx_timer);
     }
     for (int i = 0; i < M32C87_NUM_CAN; i++) {
-        M32C87CAN *c = &s->can[i];
-        c->ctlr = CTLR_RESET;
-        c->str = STR_RESET;
-        c->sstr = c->icr = c->idr = c->conr = c->tsr = 0;
-        c->recr = c->tecr = c->sbs = 0;
-        memset(c->mctl, 0, sizeof(c->mctl));
-        memset(c->slot, 0, sizeof(c->slot));
+        can_reset(&s->can[i]);
     }
 }
 
@@ -1360,9 +1517,8 @@ static void m32c87_realize(DeviceState *dev, Error **errp)
         M32C87CAN *c = &s->can[i];
         c->soc = s;
         c->index = i;
-        c->base = can_layout[i].base;
-        c->vec_trx = s->can_vec[i][0];
-        c->vec_err = s->can_vec[i][1];
+        c->irq_slot = s->can_irq[i][0];
+        c->irq_err = s->can_irq[i][1];
         c->canbus = s->canbus[i];
         c->bus_client.info = &m32c87_can_info;
         if (c->canbus &&
@@ -1382,10 +1538,11 @@ static const Property m32c87_props[] = {
     DEFINE_PROP_UINT32("avref-mv", M32C87State, avref_mv, 5000),
     DEFINE_PROP_BOOL("wdt-reset", M32C87State, wdt_reset, true),
     DEFINE_PROP_BOOL("kline-echo", M32C87State, kline_echo, false),
-    DEFINE_PROP_UINT32("can0-vec", M32C87State, can_vec[0][0], 53),
-    DEFINE_PROP_UINT32("can0-err-vec", M32C87State, can_vec[0][1], 57),
-    DEFINE_PROP_UINT32("can1-vec", M32C87State, can_vec[1][0], 54),
-    DEFINE_PROP_UINT32("can1-err-vec", M32C87State, can_vec[1][1], 58),
+    /* CAN interrupt numbers (0..5), see can_int[] */
+    DEFINE_PROP_UINT32("can0-irq", M32C87State, can_irq[0][0], 0),
+    DEFINE_PROP_UINT32("can0-err-irq", M32C87State, can_irq[0][1], 2),
+    DEFINE_PROP_UINT32("can1-irq", M32C87State, can_irq[1][0], 1),
+    DEFINE_PROP_UINT32("can1-err-irq", M32C87State, can_irq[1][1], 2),
     DEFINE_PROP_CHR("uart0", M32C87State, uart[0].chr),
     DEFINE_PROP_CHR("uart1", M32C87State, uart[1].chr),
     DEFINE_PROP_CHR("uart2", M32C87State, uart[2].chr),

@@ -155,51 +155,98 @@ void m32c_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 }
 
 /*
- * gdb register layout (little endian): r0 r1 r2 r3 (16 bit), a0 a1 fb sb
- * usp isp pc intb (32 bit), flg (16 bit)
+ * gdb raw register layout of GDB's m32c-tdep.c (make_regs) for
+ * bfd_mach_m32c, in 'g' packet order, little endian.  24-bit registers
+ * are 3 bytes wide (24-bit pointer types):
+ *
+ *   0-7   r0 r1 r2 r3, bank 0 and bank 1 of each (16 bit)
+ *   8-15  a0 a1 fb sb, bank 0 and bank 1 of each (24 bit)
+ *   16-19 usp isp intb pc (24 bit)
+ *   20    flg (16 bit)
+ *   21-23 svf (16 bit), svp vct (24 bit)
+ *   24-35 dmd0 dmd1 (8 bit), dct0 dct1 drc0 drc1 (16 bit),
+ *         dma0 dma1 dsa0 dsa1 dra0 dra1 (24 bit)
  */
+#define M32C_GDB_NUM_REGS 36
+
+static int m32c_gdb_reg_size(int n)
+{
+    switch (n) {
+    case 0 ... 7: case 20: case 21: case 26 ... 29:
+        return 2;
+    case 24: case 25:
+        return 1;
+    default:
+        return 3;
+    }
+}
+
+static uint32_t *m32c_gdb_reg_ptr(CPUM32CState *env, int n)
+{
+    switch (n) {
+    case 8 ... 11:
+        return &env->a[(n - 8) & 1][(n - 8) >> 1];
+    case 12: case 13: return &env->fb[n - 12];
+    case 14: case 15: return &env->sb[n - 14];
+    case 16: return &env->usp;
+    case 17: return &env->isp;
+    case 18: return &env->intb;
+    case 19: return &env->pc;
+    case 20: return &env->flg;
+    case 21: return &env->svf;
+    case 22: return &env->svp;
+    case 23: return &env->vct;
+    case 24: case 25: return &env->dmd[n - 24];
+    case 26: case 27: return &env->dct[n - 26];
+    case 28: case 29: return &env->drc[n - 28];
+    case 30: case 31: return &env->dma[n - 30];
+    case 32: case 33: return &env->dsa[n - 32];
+    case 34: case 35: return &env->dra[n - 34];
+    }
+    g_assert_not_reached();
+}
+
 int m32c_cpu_gdb_read_register(CPUState *cs, GByteArray *buf, int n)
 {
     CPUM32CState *env = cpu_env(cs);
-    int b = m32c_bank(env);
+    uint32_t v;
+    uint8_t b[4];
+    int size;
 
-    switch (n) {
-    case 0 ... 3:
-        return gdb_get_reg16(buf, env->r[b][n]);
-    case 4: return gdb_get_reg32(buf, env->a[b][0]);
-    case 5: return gdb_get_reg32(buf, env->a[b][1]);
-    case 6: return gdb_get_reg32(buf, env->fb[b]);
-    case 7: return gdb_get_reg32(buf, env->sb[b]);
-    case 8: return gdb_get_reg32(buf, env->usp);
-    case 9: return gdb_get_reg32(buf, env->isp);
-    case 10: return gdb_get_reg32(buf, env->pc);
-    case 11: return gdb_get_reg32(buf, env->intb);
-    case 12: return gdb_get_reg16(buf, env->flg);
+    if (n < 0 || n >= M32C_GDB_NUM_REGS) {
+        return 0;
     }
-    return 0;
+    if (n < 8) {
+        v = env->r[n & 1][n >> 1];
+    } else {
+        v = *m32c_gdb_reg_ptr(env, n);
+    }
+    size = m32c_gdb_reg_size(n);
+    stl_le_p(b, v);
+    g_byte_array_append(buf, b, size);
+    return size;
 }
 
 int m32c_cpu_gdb_write_register(CPUState *cs, uint8_t *buf, int n)
 {
     CPUM32CState *env = cpu_env(cs);
-    int b = m32c_bank(env);
-    uint32_t v32 = ldl_le_p(buf) & M32C_ADDR_MASK;
+    int size;
+    uint32_t v;
 
-    switch (n) {
-    case 0 ... 3:
-        env->r[b][n] = lduw_le_p(buf);
-        return 2;
-    case 4: env->a[b][0] = v32; return 4;
-    case 5: env->a[b][1] = v32; return 4;
-    case 6: env->fb[b] = v32; return 4;
-    case 7: env->sb[b] = v32; return 4;
-    case 8: env->usp = v32; return 4;
-    case 9: env->isp = v32; return 4;
-    case 10: env->pc = v32; return 4;
-    case 11: env->intb = v32; return 4;
-    case 12: env->flg = lduw_le_p(buf); return 2;
+    if (n < 0 || n >= M32C_GDB_NUM_REGS) {
+        return 0;
     }
-    return 0;
+    size = m32c_gdb_reg_size(n);
+    v = size == 1 ? ldub_p(buf) : size == 2 ? lduw_le_p(buf)
+                                            : lduw_le_p(buf) | (buf[2] << 16);
+    if (n < 8) {
+        env->r[n & 1][n >> 1] = v;
+    } else if (n == 20) {
+        env->flg = v & FLG_MASK;
+    } else {
+        *m32c_gdb_reg_ptr(env, n) = v;
+    }
+    return size;
 }
 
 static const VMStateDescription vmstate_m32c_cpu = {
@@ -253,7 +300,7 @@ static void m32c_cpu_class_init(ObjectClass *klass, const void *data)
     cc->sysemu_ops = &m32c_sysemu_ops;
     cc->gdb_read_register = m32c_cpu_gdb_read_register;
     cc->gdb_write_register = m32c_cpu_gdb_write_register;
-    cc->gdb_num_core_regs = 13;
+    cc->gdb_num_core_regs = M32C_GDB_NUM_REGS;
     cc->tcg_ops = &m32c_tcg_ops;
 }
 

@@ -474,11 +474,13 @@ static void _decode_opc(DisasContext * ctx)
         tcg_gen_movi_i32(cpu_sr_t, 1);
         return;
     case 0xfbfd: /* frchg */
+        CHECK_NOT_SH2
         CHECK_FPSCR_PR_0
         tcg_gen_xori_i32(cpu_fpscr, cpu_fpscr, FPSCR_FR);
         ctx->base.is_jmp = DISAS_STOP;
         return;
     case 0xf3fd: /* fschg */
+        CHECK_NOT_SH2
         CHECK_FPSCR_PR_0
         tcg_gen_xori_i32(cpu_fpscr, cpu_fpscr, FPSCR_SZ);
         ctx->base.is_jmp = DISAS_STOP;
@@ -1712,6 +1714,7 @@ static void _decode_opc(DisasContext * ctx)
         tcg_gen_andi_i32(FREG(B11_8), FREG(B11_8), 0x7fffffff);
         return;
     case 0xf06d: /* fsqrt FRn */
+        CHECK_NOT_SH2
         CHECK_FPU_ENABLED
         if (ctx->tbflags & FPSCR_PR) {
             if (ctx->opcode & 0x0100) {
@@ -1726,6 +1729,7 @@ static void _decode_opc(DisasContext * ctx)
         }
         return;
     case 0xf07d: /* fsrra FRn */
+        CHECK_NOT_SH2
         CHECK_FPU_ENABLED
         CHECK_FPSCR_PR_0
         gen_helper_fsrra_FT(FREG(B11_8), tcg_env, FREG(B11_8));
@@ -1741,6 +1745,7 @@ static void _decode_opc(DisasContext * ctx)
         tcg_gen_movi_i32(FREG(B11_8), 0x3f800000);
         return;
     case 0xf0ad: /* fcnvsd FPUL,DRn */
+        CHECK_NOT_SH2
         CHECK_FPU_ENABLED
         {
             TCGv_i64 fp = tcg_temp_new_i64();
@@ -1749,6 +1754,7 @@ static void _decode_opc(DisasContext * ctx)
         }
         return;
     case 0xf0bd: /* fcnvds DRn,FPUL */
+        CHECK_NOT_SH2
         CHECK_FPU_ENABLED
         {
             TCGv_i64 fp = tcg_temp_new_i64();
@@ -1757,6 +1763,7 @@ static void _decode_opc(DisasContext * ctx)
         }
         return;
     case 0xf0ed: /* fipr FVm,FVn */
+        CHECK_NOT_SH2
         CHECK_FPU_ENABLED
         CHECK_FPSCR_PR_0
         {
@@ -1767,6 +1774,7 @@ static void _decode_opc(DisasContext * ctx)
         }
         break;
     case 0xf0fd: /* ftrv XMTRX,FVn */
+        CHECK_NOT_SH2
         CHECK_FPU_ENABLED
         CHECK_FPSCR_PR_0
         {

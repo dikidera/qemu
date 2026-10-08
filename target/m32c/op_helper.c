@@ -323,6 +323,27 @@ static uint32_t *creg16(CPUM32CState *env, int n)
     }
 }
 
+/*
+ * LDC/POPC to a 16-bit control register: DMD0/DMD1 are 8-bit registers
+ * (only the low byte of src is transferred), FLG has 11 bits (manual 1.3,
+ * 1.4 and LDC/POPC).
+ */
+static void set_creg16(CPUM32CState *env, int n, uint32_t v)
+{
+    switch (n & 7) {
+    case 2:
+        v &= FLG_MASK;
+        break;
+    case 6: case 7:
+        v &= 0xff;
+        break;
+    default:
+        v &= 0xffff;
+        break;
+    }
+    *creg16(env, n) = v;
+}
+
 /* creg24: INTB SP SB FB SVP VCT - ISP */
 static uint32_t get_creg24(ExecCtx *x, int n)
 {
@@ -376,6 +397,13 @@ static uint32_t *dreg24(CPUM32CState *env, int n)
 /* Interrupts                                                             */
 /* ---------------------------------------------------------------------- */
 
+/*
+ * Interrupt sequence (manual 5.3): the FLG value from before the sequence
+ * is saved, I, D and (except for INT #32..#63) U are cleared, so the save
+ * goes to the ISP stack, then FLG (2 bytes) and the PC extended to 32 bits
+ * (4 bytes) are pushed and IPL is set to the level of the accepted
+ * interrupt (unchanged for interrupts without a priority level, 5.3.2).
+ */
 static void enter_int(ExecCtx *x, uint32_t ret_pc, uint32_t vector_addr,
                       bool clear_u, int ipl)
 {
@@ -415,6 +443,9 @@ bool m32c_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if (!(interrupt_request & CPU_INTERRUPT_HARD) || !env->irq_query) {
         return false;
     }
+    if (env->irq_inhibit) {
+        return false;
+    }
     if (!env->irq_query(env->irq_opaque, &req)) {
         return false;
     }
@@ -433,10 +464,12 @@ bool m32c_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
                   req.vec, req.level, env->pc);
 
     if (req.fast) {
+        /* high-speed interrupt: FLG -> SVF, PC -> SVP, jump to VCT (5.3) */
         env->svf = env->flg;
         env->svp = env->pc;
         env->flg &= ~(FLG_I | FLG_D | FLG_U);
-        env->flg = (env->flg & ~FLG_IPL_MASK) | (7 << FLG_IPL_SHIFT);
+        env->flg = (env->flg & ~FLG_IPL_MASK) |
+                   ((req.level & 7) << FLG_IPL_SHIFT);
         env->pc = env->vct;
     } else if (req.level >= 8) {
         enter_int(&x, env->pc, req.fixed_vec, true, 7);
@@ -482,9 +515,15 @@ static uint32_t do_shift(ExecCtx *x, int size, uint32_t v, int n,
     } else {
         n = -n;
         if (n > bits) {
+            /*
+             * register counts reach -16 for .B: the last bit shifted out
+             * is then the sign (SHA) or 0 (SHL)
+             */
+            setf(x, FLG_C, arith && (v & sign_bit(size)));
             n = bits;
+        } else {
+            setf(x, FLG_C, ((uint64_t)v >> (n - 1)) & 1);
         }
-        setf(x, FLG_C, ((uint64_t)v >> (n - 1)) & 1);
         if (arith) {
             res = (uint32_t)((int64_t)sx(v, size) >> n) & m;
             setf(x, FLG_O, false);
@@ -496,19 +535,27 @@ static uint32_t do_shift(ExecCtx *x, int size, uint32_t v, int n,
     return res;
 }
 
+/*
+ * ROT: the bit rotated out of MSB (LSB) goes to LSB (MSB) and to C, so C
+ * is the new LSB (MSB) even when the count is a multiple of the size
+ * (register counts go up to +-16, manual ROT).  @n is never 0 here.
+ */
 static uint32_t do_rot(ExecCtx *x, int size, uint32_t v, int n)
 {
     int bits = 8 * size;
     uint32_t m = size_mask(size);
+    int k = (n < 0 ? -n : n) % bits;
 
     v &= m;
-    n %= bits;
     if (n > 0) {
-        v = ((v << n) | (v >> (bits - n))) & m;
+        if (k) {
+            v = ((v << k) | (v >> (bits - k))) & m;
+        }
         setf(x, FLG_C, v & 1);
-    } else if (n < 0) {
-        n = -n;
-        v = ((v >> n) | (v << (bits - n))) & m;
+    } else {
+        if (k) {
+            v = ((v >> k) | (v << (bits - k))) & m;
+        }
         setf(x, FLG_C, v & sign_bit(size));
     }
     set_sz(x, size, v);
@@ -561,6 +608,13 @@ static uint32_t bcd_sub(ExecCtx *x, int size, uint32_t a, uint32_t b,
 /* Bit operations                                                         */
 /* ---------------------------------------------------------------------- */
 
+/*
+ * bit,base:11/19/27[An|SB|FB]: the address is base register + the
+ * dsp:8/16/24 part of base (unsigned except for FB) and bit is the 3-bit
+ * field of op2.  The manual text for bit,base:n[A0/A1] reads as if An
+ * were a bit offset, but its figure and the address ranges given treat An
+ * as a byte address (manual 2.6); the latter is implemented.
+ */
 static Loc bit_loc(ExecCtx *x, const M32CInsn *d, int *bit)
 {
     Loc l;
@@ -590,6 +644,15 @@ static void undefined(ExecCtx *x, const M32CInsn *d)
     enter_int(x, d->next, M32C_VEC_UND, true, -1);
 }
 
+/*
+ * MOV.B to A0/A1 zero-extends src to 16 bits and the flags follow the
+ * 16-bit transfer data, so S is always 0 (manual 2.7 and MOV [Function]).
+ */
+static int mov_flag_size(const Loc *dl, int size)
+{
+    return size == 1 && dl->kind == LOC_AX ? 2 : size;
+}
+
 static void exec_insn(ExecCtx *x, const M32CInsn *d)
 {
     CPUM32CState *env = x->env;
@@ -611,13 +674,13 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
         case F_IMM_DST5: case F_IMM_DST2:
             dl = dst_loc(x, d, size);
             wr(x, &dl, size, d->imm);
-            set_sz(x, size, d->imm);
+            set_sz(x, mov_flag_size(&dl, size), d->imm);
             break;
         case F_Q4_DST5:
             r = sx4(d->b2) & size_mask(size);
             dl = dst_loc(x, d, size);
             wr(x, &dl, size, r);
-            set_sz(x, size, r);
+            set_sz(x, mov_flag_size(&dl, size), r);
             break;
         case F_ZERO_DST2:
             dl = dst_loc(x, d, size);
@@ -625,6 +688,12 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             set_sz(x, size, 0);
             break;
         case F_IMM_AX:
+            /*
+             * MOV.W:S #IMM16 / MOV.L:S #IMM24, A0/A1.  For .L the manual
+             * says the flags follow a 32-bit operation but not how the
+             * 24-bit immediate is extended; S is taken from bit 23
+             * (ambiguous, unchanged).
+             */
             A(x, d->b1 & 1) = d->imm & M32C_ADDR_MASK;
             set_sz(x, size == 2 ? 2 : 3, d->imm);
             break;
@@ -633,7 +702,7 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             r = rd(x, &sl, size);
             dl = dst_loc(x, d, size);
             wr(x, &dl, size, r);
-            set_sz(x, size, r);
+            set_sz(x, mov_flag_size(&dl, size), r);
             break;
         case F_DST5_SP:
             dl = dst_loc(x, d, size);
@@ -771,9 +840,10 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             goto done;
         }
         case F_IMM1P_AX:        /* ADD.L:S #1/#2, Ax */
+            /* .L with Ax: dest is zero-extended to 32 bits (manual ADD) */
             b = ((d->b1 >> 5) & 1) + 1;
             a = A(x, d->b1 & 1);
-            r = do_add(x, 4, sx(a, 3), b, 0);
+            r = do_add(x, 4, a, b, 0);
             A(x, d->b1 & 1) = r & M32C_ADDR_MASK;
             goto done;
         case F_IMM3P_SP:        /* ADD.L:Q #1..8, SP */
@@ -781,7 +851,7 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             is_sp = true;
             break;
         case F_IMM_SP:
-            b = d->imm;
+            b = d->imm;         /* already sign-extended by the decoder */
             is_sp = true;
             break;
         default:
@@ -789,11 +859,28 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             goto done;
         }
         if (is_sp) {
-            r = do_add(x, 3, m32c_get_sp(env), b, 0);
+            /*
+             * ADD.L to SP: SP is zero-extended and src sign-extended to
+             * 32 bits, the flags follow the 32-bit result and the low
+             * 24 bits are stored (manual ADD [Function]).
+             */
+            r = do_add(x, 4, m32c_get_sp(env), b, 0);
             m32c_set_sp(env, r);
             break;
         }
         dl = dst_loc(x, d, size);
+        if (size == 1 && dl.kind == LOC_AX) {
+            /*
+             * .B with dest A0/A1: src is zero-extended and the operation
+             * (and the flags) are 16-bit on the low 16 bits of Ax; bits
+             * 23..16 of Ax become 0 (manual 2.7 and ADD/ADC/AND/CMP/OR/
+             * SBB/SUB/TST/XOR [Function]).  For the :Q forms the manual
+             * does not say how #IMM4 is extended; it is taken as the 8-bit
+             * value, zero-extended like any other .B src (ambiguous).
+             */
+            size = 2;
+            b &= 0xff;
+        }
         a = rd(x, &dl, size);
         switch (d->op) {
         case OP_ADD: case OP_ADDX:
@@ -890,11 +977,13 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
         set_sz(x, 2, r);
         break;
     case OP_MAX: case OP_MIN: case OP_CLIP:
+        /* dest is only written (Ax bits 23..16 cleared) when it changes */
         dl = dst_loc(x, d, size);
         sa = sx(rd(x, &dl, size), size);
         if (d->op == OP_CLIP) {
             int32_t lo = sx(d->imm, size), hi = sx(d->imm2, size);
-            r = sa < lo ? lo : sa > hi ? hi : sa;
+            sb = sa < lo ? lo : sa;
+            sb = hi < sb ? hi : sb;
         } else {
             if (d->form == F_SRC5_DST5) {
                 sl = src_loc(x, d, size);
@@ -902,9 +991,11 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             } else {
                 sb = sx(d->imm, size);
             }
-            r = d->op == OP_MAX ? MAX(sa, sb) : MIN(sa, sb);
+            sb = d->op == OP_MAX ? MAX(sa, sb) : MIN(sa, sb);
         }
-        wr(x, &dl, size, r);
+        if (sb != sa) {
+            wr(x, &dl, size, sb);
+        }
         break;
     case OP_MUL: case OP_MULU: {
         int big = size == 1 ? 2 : 4;
@@ -1081,6 +1172,12 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             case OP_BNOT: nv = !v; break;
             default: nv = m32c_cond(env->flg, d->extra & 0xf); break;
             }
+            if (dl.kind == LOC_AX) {
+                /* bit,A0/A1 addresses the low 8 bits; the rest is kept */
+                A(x, dl.idx) = (A(x, dl.idx) & ~(1u << bit)) |
+                               ((uint32_t)nv << bit);
+                break;
+            }
             r = (a & ~(1u << bit)) | ((uint32_t)nv << bit);
             wr(x, &dl, 1, r);
             break;
@@ -1095,6 +1192,7 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
         break;
     }
     case OP_FSET: case OP_FCLR:
+        env->irq_inhibit = true;
         setf(x, 1u << (d->b2 & 7), d->op == OP_FSET);
         break;
     case OP_SC_CND:
@@ -1127,7 +1225,8 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
         if (d->op == OP_JSRS) {
             push(x, 4, next);
         }
-        r = ld(x, 0xfffe - (d->imm & 0xff) * 2, 2);
+        /* PCH <- FFh, PCML <- M(FFFFFEh - src * 2): page 255 at FFFE00h */
+        r = ld(x, M32C_SPECIAL_PAGE_VEC(d->imm & 0xff), 2);
         env->pc = 0xff0000 | r;
         break;
     case OP_RTS:
@@ -1135,11 +1234,11 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
         break;
     case OP_REIT:
         env->pc = pop(x, 4) & M32C_ADDR_MASK;
-        env->flg = pop(x, 2);
+        env->flg = pop(x, 2) & FLG_MASK;
         break;
     case OP_FREIT:
-        env->flg = env->svf;
-        env->pc = env->svp;
+        env->flg = env->svf & FLG_MASK;
+        env->pc = env->svp & M32C_ADDR_MASK;
         break;
     case OP_ENTER:
         push(x, 4, FB(x));
@@ -1167,8 +1266,22 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             enter_int(x, next, M32C_VEC_INTO, true, -1);
         }
         break;
-    case OP_BRK: case OP_BRK2:
-        enter_int(x, next, M32C_VEC_BRK, true, -1);
+    case OP_BRK:
+        /*
+         * BRK uses the fixed vector at 0xffffe4 unless all of 0xffffe4..e7
+         * hold 0xff, in which case it uses the variable vector table entry
+         * at IntBase (manual BRK [Operation]).  Table 5.1.1 only mentions
+         * the byte at 0xffffe7; the instruction page is followed here.
+         */
+        if (ld(x, M32C_VEC_BRK, 4) == 0xffffffff) {
+            enter_int(x, next, env->intb, true, -1);
+        } else {
+            enter_int(x, next, M32C_VEC_BRK, true, -1);
+        }
+        break;
+    case OP_BRK2:
+        /* PC <- M(000020h), the emulator vector (manual BRK2, 5.1) */
+        enter_int(x, next, M32C_VEC_BRK2, true, -1);
         break;
     case OP_WAIT:
         env->pc = next;
@@ -1228,8 +1341,9 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
         }
         break;
     case OP_POPC:
+        env->irq_inhibit = true;
         if (d->form == F_CREG16) {
-            *creg16(env, d->b2 & 7) = pop(x, 2) & 0xffff;
+            set_creg16(env, d->b2 & 7, pop(x, 2));
         } else {
             set_creg24(x, d->b2 & 7, pop(x, 4));
         }
@@ -1237,9 +1351,10 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
 
     /* ---- control registers ---- */
     case OP_LDC:
+        env->irq_inhibit = true;
         switch (d->form) {
         case F_IMM_CREG16:
-            *creg16(env, d->b2 & 7) = d->imm & 0xffff;
+            set_creg16(env, d->b2 & 7, d->imm);
             break;
         case F_IMM_CREG24:
             set_creg24(x, d->b2 & 7, d->imm);
@@ -1249,7 +1364,7 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             break;
         case F_DST5_CREG16:
             dl = dst_loc(x, d, 2);
-            *creg16(env, d->b2 & 7) = rd(x, &dl, 2);
+            set_creg16(env, d->b2 & 7, rd(x, &dl, 2));
             break;
         case F_DST5_CREG24:
             dl = dst_loc(x, d, 4);
@@ -1282,18 +1397,31 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
         }
         break;
     case OP_LDIPL:
+        env->irq_inhibit = true;
         env->flg = (env->flg & ~FLG_IPL_MASK) |
                    ((d->b2 & 7) << FLG_IPL_SHIFT);
         break;
     case OP_LDCTX: case OP_STCTX: {
-        /* register save/restore by task table (OS support) */
+        /*
+         * Register save/restore by task table (manual LDCTX/STCTX): the
+         * byte at abs24 + 2 * task number holds the register bits
+         * (FB SB A1 A0 R3 R2 R1 R0, MSB first), the next one the SP
+         * correction value.  The task number is read as a byte (task
+         * numbers are 0..255; the manual does not give its size).  R0 is
+         * at the lowest address: LDCTX restores from SP upwards starting
+         * with R0 and then adds the correction value to SP; STCTX stores
+         * "beginning with FB" and subtracts the correction value.  The
+         * manual does not say where the registers go if the correction
+         * value differs from their total size; STCTX keeps storing them
+         * upwards from the corrected SP.
+         */
         uint32_t task = ld(x, d->imm, 1);
         uint32_t ent = d->imm2 + task * 2;
         uint8_t regs = ld(x, ent, 1);
+        uint8_t spc = ld(x, ent + 1, 1);
         uint32_t sp = m32c_get_sp(env);
         static const int sizes[8] = { 2, 2, 2, 2, 4, 4, 4, 4 };
         if (d->op == OP_STCTX) {
-            uint8_t spc = ld(x, ent + 1, 1);
             sp -= spc;
             m32c_set_sp(env, sp);
         }
@@ -1322,7 +1450,7 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             sp += sizes[i];
         }
         if (d->op == OP_LDCTX) {
-            m32c_set_sp(env, sp);
+            m32c_set_sp(env, m32c_get_sp(env) + spc);
         }
         break;
     }
@@ -1362,39 +1490,62 @@ static void exec_insn(ExecCtx *x, const M32CInsn *d)
             A(x, 1) = (A(x, 1) + size) & M32C_ADDR_MASK;
         } while ((size == 1 ? a : (a & 0xff) && (a & 0xff00)) != 0);
         break;
-    case OP_SCMPU:
+    case OP_SCMPU: {
+        /*
+         * Compared by byte for both sizes: the flags are those of the
+         * 8-bit M(A0) - M(A1) that ended the comparison; .W compares the
+         * high bytes only when the low bytes match and are not 0.  Stop
+         * at a mismatch or a 0 in M(A0) (or M(A0 + 1) for .W).  The Z
+         * description also says "set when 0 is found in M(A0)", which
+         * conflicts with a mismatch on that byte; Z follows the
+         * subtraction here.  A0/A1 are indeterminate afterwards (manual
+         * SCMPU); they are left past the last compared unit.
+         */
+        bool stop;
         do {
-            a = ld(x, A(x, 0), size);
-            b = ld(x, A(x, 1), size);
-            do_sub(x, size, a, b, 0);
-            A(x, 0) = (A(x, 0) + size) & M32C_ADDR_MASK;
-            A(x, 1) = (A(x, 1) + size) & M32C_ADDR_MASK;
-        } while (a == b && (size == 1 ? a : (a & 0xff) && (a & 0xff00)));
+            uint32_t a0 = A(x, 0), a1 = A(x, 1);
+            uint32_t t0 = ld(x, a0, 1), t2 = ld(x, a1, 1);
+            do_sub(x, 1, t0, t2, 0);
+            stop = t0 == 0 || t0 != t2;
+            if (size == 2 && !stop) {
+                uint32_t t1 = ld(x, a0 + 1, 1), t3 = ld(x, a1 + 1, 1);
+                do_sub(x, 1, t1, t3, 0);
+                stop = t1 == 0 || t1 != t3;
+            }
+            A(x, 0) = (a0 + size) & M32C_ADDR_MASK;
+            A(x, 1) = (a1 + size) & M32C_ADDR_MASK;
+        } while (!stop);
         break;
+    }
     case OP_RMPA: {
+        /*
+         * R1R2R0 += M(A0) * M(A1) (signed), for both sizes, R3 times; O is
+         * set when the sum leaves the 32-bit signed range during the
+         * operation (manual RMPA).  Nothing happens when R3 is 0.
+         */
         int64_t acc;
-        if (size == 1) {
-            acc = (int16_t)R(x, R0);
-        } else {
-            acc = (int64_t)(((uint64_t)R(x, R1) << 32) |
-                            ((uint64_t)R(x, R2) << 16) | R(x, R0));
-            acc = (acc << 16) >> 16;
+        bool ovf = false;
+        if (!R(x, R3)) {
+            break;
         }
+        acc = (int64_t)(((uint64_t)R(x, R1) << 32) |
+                        ((uint64_t)R(x, R2) << 16) | R(x, R0));
+        acc = (int64_t)((uint64_t)acc << 16) >> 16;
         while (R(x, R3)) {
             int64_t p = (int64_t)sx(ld(x, A(x, 0), size), size) *
                         sx(ld(x, A(x, 1), size), size);
             acc += p;
+            if (acc > INT32_MAX || acc < INT32_MIN) {
+                ovf = true;
+            }
             A(x, 0) = (A(x, 0) + size) & M32C_ADDR_MASK;
             A(x, 1) = (A(x, 1) + size) & M32C_ADDR_MASK;
             R(x, R3)--;
         }
-        if (size == 1) {
-            R(x, R0) = acc;
-        } else {
-            R(x, R0) = acc;
-            R(x, R2) = acc >> 16;
-            R(x, R1) = acc >> 32;
-        }
+        R(x, R0) = acc;
+        R(x, R2) = acc >> 16;
+        R(x, R1) = acc >> 32;
+        setf(x, FLG_O, ovf);
         break;
     }
 
@@ -1456,6 +1607,7 @@ void helper_exec(CPUM32CState *env, uint32_t pc)
     M32CInsn d;
 
     env->pc = pc;
+    env->irq_inhibit = false;
     m32c_decode(&d, pc, fetch_code, env);
     if (is_index(d.op)) {
         /* the prefix applies to (and is atomic with) the next insn */

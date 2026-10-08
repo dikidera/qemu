@@ -137,6 +137,28 @@ static int sh705x_irq_query(void *opaque, int imask, int *level)
     return best;
 }
 
+static void intc_irq_pins_update(SH705xState *s);
+
+/*
+ * Exception handling clears the NMI request and, in edge detection mode,
+ * the IRQn flag in ISR.  Level-detected IRQn stays pending while the pin
+ * is held low.
+ */
+static void sh705x_irq_ack(void *opaque, int vec)
+{
+    SH705xState *s = opaque;
+
+    if (vec == SH705X_VEC_NMI) {
+        sh705x_set_irq(s, vec, false);
+    } else if (vec >= SH705X_VEC_IRQ0 && vec < SH705X_VEC_IRQ0 + 8) {
+        int n = vec - SH705X_VEC_IRQ0;
+        if (s->icr & (0x80 >> n)) {
+            s->isr &= ~(0x80 >> n);
+            intc_irq_pins_update(s);
+        }
+    }
+}
+
 static void sh705x_update_irq(SH705xState *s)
 {
     CPUState *cs = CPU(s->cpu);
@@ -1187,6 +1209,7 @@ static void sh705x_realize(DeviceState *dev, Error **errp)
 
     s->cpu = SUPERH_CPU(cpu_create(cpu_type));
     s->cpu->env.sh2_irq_query = sh705x_irq_query;
+    s->cpu->env.sh2_irq_ack = sh705x_irq_ack;
     s->cpu->env.sh2_irq_opaque = s;
 
     memory_region_init_rom(&s->rom, OBJECT(s), "sh705x.rom", s->rom_size,
@@ -1265,6 +1288,11 @@ static void sh705x_realize(DeviceState *dev, Error **errp)
 
 static const Property sh705x_props[] = {
     DEFINE_PROP_UINT32("variant", SH705xState, variant, SH705X_7058),
+    /*
+     * Peripheral clock.  20 MHz matches what tested reflash code (npkern)
+     * relies on for these ECUs: SCI BRR=9 gives 62500 bps (Pphi/32/10) and
+     * ATU PSCR=0x1f, CKSEL=0 gives a 625 kHz count.
+     */
     DEFINE_PROP_UINT32("pclk-hz", SH705xState, pclk_hz, 20000000),
     DEFINE_PROP_UINT32("avref-mv", SH705xState, avref_mv, 5000),
     DEFINE_PROP_BOOL("wdt-reset", SH705xState, wdt_reset, true),

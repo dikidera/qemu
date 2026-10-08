@@ -2,6 +2,7 @@
 # Self checking M32C/80 instruction test ROM for the ecu-m32c87 machine.
 # Prints "CPU OK" on UART0, or "F<n>" for each failing check.
 # SPDX-License-Identifier: GPL-2.0-or-later
+import struct
 import sys
 from m32casm import *
 
@@ -50,6 +51,12 @@ a.org(0xFFFFFC)
 a.addr24('start')
 a.org(VECT + 40 * 4)
 a.addr24('int40')
+a.org(VECT)                         # BRK via INTB (FFFFE4h..E7h are FFh)
+a.addr24('brk_h')
+a.org(0xFFFFFE - 2 * 20)            # special page vectors (low 16 bits)
+a.addr24('sp20')
+a.org(0xFFFFFE - 2 * 22)
+a.addr24('sp22')
 
 a.org(0xFF0000)
 a.label('start')
@@ -234,6 +241,107 @@ a.bclr(3, ABS16(MEM))
 a.btst(3, ABS16(MEM))
 check_cond(EQ)
 
+# --- .B arithmetic with dest A0 is a 16-bit operation, bits 23..16 -> 0
+a.emit(bytes([0xbc]) + (0x1200f0).to_bytes(3, 'little'))  # MOV.L:S #,A0
+a.g1(0x80, 0x2e, A0, 0, bytes([0x20]))                  # ADD.B #20h,A0
+a.mov_l(A0, R2R0)
+check_w(R0, 0x0110)
+check_w(R2, 0x0000)
+# MOV.B to A0: flags of the zero-extended 16-bit data (S = 0)
+a.mov_b_imm(0x80, A0)
+check_cond(PZ)
+# ADD.L:S #1,A0 zero-extends A0 to 32 bits
+a.emit(bytes([0xbc]) + (0x800000).to_bytes(3, 'little'))
+a.emit(b'\x8c')                                       # ADD.L:S #1,A0
+check_cond(PZ)
+# ADD.L #IMM16,SP: flags of the 32-bit operation
+a.ldc24(0x7ffffe, 'SP')
+a.emit(b'\xb6\x13\x02\x00')                           # ADD.L:G #2,SP
+a.ldc24(0x00c000, 'SP')                                # (keeps the flags)
+check_cond(PZ)
+
+# --- JSRS/JMPS use the special page table at FFFFFEh - 2 * n
+a.mov_w_imm(0, R0)
+a.emit(bytes([0xdd, 20]))                              # JSRS #20
+check_w(R0, 0x0020)
+a.emit(bytes([0xdc, 22]))                              # JMPS #22
+a.label('jmps_ret')
+check_w(R0, 0x0022)
+
+# --- BRK with FFh at FFFFE4h..E7h uses the vector at INTB
+a.mov_w_imm(0, R0)
+a.emit(b'\x00')                                        # BRK
+check_w(R0, 0x0b0b)
+
+# --- ROT by a multiple of the size still sets C (= new LSB)
+a.mov_b_imm(0x81, R0L)
+a.mov_b_imm(8, R1H)
+a.fclr('C')
+a.g1(0xa0, 0x3f, R0L, 0)                               # ROT.B R1H,R0L
+check_cond(GEU)
+# SHL.B by -9: the last bit shifted out is 0
+a.mov_b_imm(0x80, R0L)
+a.mov_b_imm(0xf7, R1H)
+a.fset('C')
+a.g1(0xa0, 0x3e, R0L, 0)                               # SHL.B R1H,R0L
+check_cond(LTU)
+
+# --- MAX only writes dest when it changes
+a.emit(bytes([0xbc]) + (0x120010).to_bytes(3, 'little'))
+a.emit(b'\x01')
+a.g1(0x80, 0x3f, A0, 1, struct.pack('<H', 0xfffb))     # MAX.W #-5,A0
+a.mov_l(A0, R2R0)
+check_w(R2, 0x0012)
+# --- bit instructions on A0 keep the other bits
+a.emit(bytes([0xbc]) + (0x123400).to_bytes(3, 'little'))
+a.bset(0, A0)
+a.mov_l(A0, R2R0)
+check_w(R0, 0x3401)
+check_w(R2, 0x0012)
+
+# --- RMPA.B accumulates in R1R2R0; RMPA.W sets O beyond 32 bits
+a.mov_w_imm(0x0302, ABS16(MEM + 0x50))
+a.mov_w_imm(0x0504, ABS16(MEM + 0x54))
+a.emit(bytes([0x9c]) + (MEM + 0x50).to_bytes(2, 'little'))
+a.emit(bytes([0x9d]) + (MEM + 0x54).to_bytes(2, 'little'))
+a.mov_w_imm(0xfff0, R0)
+a.mov_w_imm(0, R2)
+a.mov_w_imm(0, R1)
+a.mov_w_imm(2, R3)
+a.emit(b'\xb8\x43')                                    # RMPA.B
+check_w(R0, 0x0007)                                    # FFF0h + 2*4 + 3*5
+check_w(R2, 0x0001)
+a.mov_w_imm(0x0100, ABS16(MEM + 0x50))
+a.emit(bytes([0x9c]) + (MEM + 0x50).to_bytes(2, 'little'))
+a.emit(bytes([0x9d]) + (MEM + 0x50).to_bytes(2, 'little'))
+a.mov_w_imm(0xfff0, R0)
+a.mov_w_imm(0x7fff, R2)
+a.mov_w_imm(1, R3)
+a.emit(b'\xb8\x53')                                    # RMPA.W
+check_cond(O)
+
+# --- SCMPU.W compares by byte: 01h < 02h in the low byte
+a.mov_w_imm(0x0201, ABS16(MEM + 0x50))
+a.mov_w_imm(0x0102, ABS16(MEM + 0x54))
+a.emit(bytes([0x9c]) + (MEM + 0x50).to_bytes(2, 'little'))
+a.emit(bytes([0x9d]) + (MEM + 0x54).to_bytes(2, 'little'))
+a.emit(b'\xb8\xd3')                                    # SCMPU.W
+check_cond(LTU)
+check_cond(NE)
+
+# --- LDCTX adds the SP correction value from the table to SP
+a.mov_b_imm(0, ABS16(MEM + 0x60))                      # task number 0
+a.mov_b_imm(0x01, ABS16(MEM + 0x62))                   # R0 only
+a.mov_b_imm(4, ABS16(MEM + 0x63))                      # SP correction
+a.emit(b'\xaf\xaa\xaa')                                 # PUSH.W #0AAAAh
+a.emit(b'\xaf\x55\x55')                                 # PUSH.W #5555h
+a.emit(b'\xaf\x34\x12')                                 # PUSH.W #1234h
+a.emit(b'\xb6\xc3' + (MEM + 0x60).to_bytes(2, 'little') +
+       (MEM + 0x62).to_bytes(3, 'little'))             # LDCTX
+check_w(R0, 0x1234)
+a.pop_w(R1)
+check_w(R1, 0xaaaa)
+
 a.cmp_w_imm(0, ABS16(0x0800))
 a.j(NE, 'done')
 for ch in b'CPU OK\n':
@@ -248,6 +356,18 @@ a.enter(4)
 a.mov_w(R0, FB8(-2))
 a.add_w(FB8(-2), R0)
 a.exitd()
+
+a.label('sp20')
+a.mov_w_imm(0x0020, R0)
+a.rts()
+
+a.label('sp22')
+a.mov_w_imm(0x0022, R0)
+a.jmp('jmps_ret')
+
+a.label('brk_h')
+a.mov_w_imm(0x0b0b, R0)
+a.reit()
 
 a.label('int40')
 a.mov_w_imm(0x0040, R0)

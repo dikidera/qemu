@@ -57,6 +57,7 @@ static void hcan_irq(SH705xHCAN *h)
 
     sh705x_set_irq(s, h->vec_base + 0, irr & 0x0078);           /* ERS */
     sh705x_set_irq(s, h->vec_base + 1, irr & 0xfe81);           /* OVR */
+    /* remote frame reception also raises the receive interrupt (REJ06B0975) */
     sh705x_set_irq(s, h->vec_base + 2, irr & 0x0006);           /* RM */
     sh705x_set_irq(s, h->vec_base + 3, irr & 0x0100);           /* SLE */
 }

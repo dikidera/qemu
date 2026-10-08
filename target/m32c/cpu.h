@@ -24,6 +24,8 @@
 #define FLG_U   0x0080
 #define FLG_IPL_SHIFT 12
 #define FLG_IPL_MASK  (7 << FLG_IPL_SHIFT)
+/* FLG is an 11-bit register: bits 8-11 and 15 are reserved (manual 1.4) */
+#define FLG_MASK      (0x00ff | FLG_IPL_MASK)
 
 /* Fixed vector table */
 #define M32C_VEC_UND    0xffffdc
@@ -34,6 +36,10 @@
 #define M32C_VEC_DBC    0xfffff4
 #define M32C_VEC_NMI    0xfffff8
 #define M32C_VEC_RESET  0xfffffc
+/* BRK2 / single step vector, "exclusively for emulator" (manual 5.1) */
+#define M32C_VEC_BRK2   0x000020
+/* special page vector table: page 255 at 0xfffe00 ... page 18 at 0xffffda */
+#define M32C_SPECIAL_PAGE_VEC(n)    (0xfffffe - 2 * (n))
 
 /*
  * Interrupt controller interface.  The SoC returns the software interrupt
@@ -67,6 +73,12 @@ typedef struct CPUArchState {
     uint32_t svp;
     uint32_t vct;
     uint32_t dmd[2], dct[2], drc[2], dma[2], dsa[2], dra[2];
+    /*
+     * Set by FSET/FCLR/LDC/POPC/LDIPL: an I flag or IPL change made by
+     * these takes effect from the next instruction (manual 5.2.1, 5.2.3),
+     * so no interrupt is accepted until one more instruction has run.
+     */
+    bool irq_inhibit;
 
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;

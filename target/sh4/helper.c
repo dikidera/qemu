@@ -137,6 +137,9 @@ static void sh2_cpu_do_interrupt(CPUState *cs)
         }
         qemu_log_mask(CPU_LOG_INT, "SH-2 interrupt vector %d level %d "
                       "at pc=0x%08x\n", vec, level, ret_pc);
+        if (env->sh2_irq_ack) {
+            env->sh2_irq_ack(env->sh2_irq_opaque, vec);
+        }
         sh2_enter_exception(env, vec, ret_pc);
         env->sr = (env->sr & ~(0xf << 4)) | ((level & 0xf) << 4);
         qemu_plugin_vcpu_interrupt_cb(cs, last_pc);

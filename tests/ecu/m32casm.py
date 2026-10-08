@@ -283,6 +283,9 @@ class Asm2(Asm):
         self.fixups.append((self.pc, 'adjnz', lbl, at))
         self.emit(b'\0')
 
+    def mov_l(self, src, dst):
+        self.g2(0x3, src, dst, 1)
+
     def mov_w_ind_src(self, src, dst):
         """MOV.W [src], dst (indirect source prefix)"""
         self.g2(0xb, src, dst, 1, prefix=b'\x41')
