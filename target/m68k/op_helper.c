@@ -537,8 +537,10 @@ static void m68k_interrupt_all(CPUM68KState *env, int is_hw)
 
     if (cpu32) {
         cpu32_stack_frame(env, &sp, oldsr);
-    } else switch (cs->exception_index) {
+        goto frame_done;
+    }
 
+    switch (cs->exception_index) {
     case EXCP_ACCESS:
         if (env->mmu.fault) {
             cpu_abort(cs, "DOUBLE MMU FAULT\n");
@@ -634,6 +636,7 @@ static void m68k_interrupt_all(CPUM68KState *env, int is_hw)
         break;
     }
 
+frame_done:
     env->aregs[7] = sp;
     /* Jump to vector.  */
     env->pc = cpu_ldl_be_mmuidx_ra(env, env->vbr + vector, MMU_KERNEL_IDX, 0);

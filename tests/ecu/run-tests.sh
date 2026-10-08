@@ -90,4 +90,13 @@ if [ -x "$BUILD/qemu-system-m68k" ]; then
     done
 fi
 
+if [ -x "$BUILD/qemu-system-m68k" ]; then
+    # CPU32 core self-test (TBLx, LPSTOP, exception frames, VBR, MULx.L/
+    # DIVx.L, CHK2/CMP2, address/bus errors, interrupts) on the minimal
+    # cpu32-test machine
+    python3 "$HERE/cpu32_test_rom.py" "$TMP/cpu32.bin" || exit 1
+    run qemu-system-m68k cpu32-test "$TMP/cpu32.bin" cpu32
+    check cpu32 "$TMP/cpu32.out" "CPU32 OK"
+fi
+
 exit $fail

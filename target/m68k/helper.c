@@ -1088,6 +1088,10 @@ uint32_t HELPER(sats)(uint32_t val, uint32_t v)
 void cpu_m68k_set_sr(CPUM68KState *env, uint32_t sr)
 {
     env->sr = sr & 0xffe0;
+    if (m68k_feature(env, M68K_FEATURE_CPU32)) {
+        /* CPU32RM 2.x figure: SR bits 12, 11 and 7-5 read as zero */
+        env->sr &= 0xe700;
+    }
     cpu_m68k_set_ccr(env, sr);
     m68k_switch_sp(env);
 }

@@ -24,20 +24,20 @@ USTACK = 0x70000
 VBR2 = 0x8000           # relocated vector table
 
 # variables (absolute short addresses)
-RESUME = 0x1000         # where the generic handler returns to
-EXC_SR = 0x1004
-EXC_PC = 0x1006
-EXC_FV = 0x100A
-EXC_X1 = 0x100C         # frame + 8
-EXC_X2 = 0x1010         # frame + $10
-EXC_SSW = 0x1014        # frame + $16
-EXC_CNT = 0x1018
-IRQ_CNT = 0x101C
-IRQ_SR = 0x1020
-IRQ_CLR = 0x1022
-VBR_HIT = 0x1024
-SAVE_SP = 0x1028
-SCRATCH = 0x2000
+RESUME = 0x7000         # where the generic handler returns to
+EXC_SR = 0x7004
+EXC_PC = 0x7006
+EXC_FV = 0x700A
+EXC_X1 = 0x700C         # frame + 8
+EXC_X2 = 0x7010         # frame + $10
+EXC_SSW = 0x7014        # frame + $16
+EXC_CNT = 0x7018
+IRQ_CNT = 0x701C
+IRQ_SR = 0x7020
+IRQ_CLR = 0x7022
+VBR_HIT = 0x7024
+SAVE_SP = 0x7028
+SCRATCH = 0x7800
 
 a = Asm(0, 0x10000, fill=0xff)
 
@@ -213,6 +213,12 @@ a.move_l(SP, D0)
 chk_l(SSP, D0)
 a.clr_l(absw(RESUME))
 a.clr_w(absw(IRQ_CLR))
+
+test(1)                             # unimplemented SR bits read as 0
+a.move_w(imm(0x3FFF), SR)              # all but T1/T0
+a.move_w(SR, D0)
+chk_w(0x271F, D0)
+a.move_w(imm(0x2700), SR)
 
 # 2: EXTB.L (CPU32RM EXT/EXTB)
 test(2)
@@ -504,9 +510,10 @@ a.tbls_w(pcrel('tw'), D0)
 chk_l(0xABCD068A, D0)
 a.move_l(imm(0xABCD018E), D0)
 a.tblun_w(absl('tw'), D0)           # 1311*256 + 93010, zero extended
-chk_l(0x00068A52, D0)
 a.bvs('fail')
 a.bmi('fail')
+a.beq('fail')
+chk_l(0x00068A52, D0)
 a.move_l(imm(0x12340BD0), D0)       # example 3: Y = 80+208*(64-80)/256
 a.lea(absl('tb3'), A0)
 a.tblu_b(ind(A0), D0)
@@ -521,26 +528,26 @@ chk_l(0x10000100, D0)
 
 # 18: TBLS rounding (round half away from zero), TBLSN sign extension, CCs
 test(18)
-a.move_l(imm(0x55555580), D0)       # tbs: [0, -1], fraction 1/2
+a.move_l(imm(0x55550080), D0)       # tbs: [0, -1], fraction 1/2
 a.tbls_b(absl('tbs'), D0)           # -1/2 -> -1
-chk_l(0x555555FF, D0)
 a.bpl('fail')                       # N from bit 7
-a.move_l(imm(0x5555557F), D0)
+chk_l(0x555500FF, D0)
+a.move_l(imm(0x5555007F), D0)
 a.tbls_b(absl('tbs'), D0)           # -127/256 -> 0
 a.bne('fail')                       # Z
-chk_l(0x55555500, D0)
-a.move_l(imm(0x55555180), D0)       # entry 1: [-1, 0]: +1/2 -> +1 = 0
-a.tbls_b(absl('tbs'), D0)
-chk_l(0x55555500, D0)
-a.move_l(imm(0x55555340), D0)       # entry 3: [0x10, 0x20], 1/4
+chk_l(0x55550000, D0)
+a.move_l(imm(0x55550180), D0)       # entry 1: [-1, 0]: +1/2 -> +1 = 0
+a.tbls_b(absl('tbs'), D0)           # (only Dx[7:0] is written)
+chk_l(0x55550100, D0)
+a.move_l(imm(0x55550340), D0)       # entry 3: [0x10, 0x20], 1/4
 a.tblsn_b(absl('tbs'), D0)          # 0x1000 + 16*64
 chk_l(0x00001400, D0)
-a.move_l(imm(0x55555540), D0)       # entry 5: [-16, -32], 1/4
+a.move_l(imm(0x55550540), D0)       # entry 5: [-16, -32], 1/4
 a.tblsn_b(absl('tbs'), D0)          # -4096 - 1024, sign extended
-chk_l(0xFFFFEC00, D0)
 a.bpl('fail')
+chk_l(0xFFFFEC00, D0)
 a.move_w(imm(0x1F), CCR)
-a.move_l(imm(0x55555340), D0)
+a.move_l(imm(0x55550340), D0)
 a.tbls_b(absl('tbs'), D0)           # X unaffected, V and C cleared
 a.bcs('fail')
 a.bvs('fail')
@@ -681,6 +688,7 @@ a.moveq(1, D0)
 a.seq(D1)
 a.cmpi_b(0, D1)
 fail_ne()
+a.moveq(1, D0)
 a.sne(D1)
 a.cmpi_b(0xFF, D1)
 fail_ne()
@@ -745,6 +753,7 @@ a.label('s_fail')
 a.asciz('FAIL ')
 a.label('s_unexp')
 a.asciz('UNEXP ')
+assert a.here <= RESUME, 'code overlaps the variables'
 
 if __name__ == '__main__':
     out = sys.argv[1] if len(sys.argv) > 1 else 'cpu32_test.bin'
