@@ -149,6 +149,20 @@ typedef struct CPUArchState {
     int pending_vector;
     int pending_level;
 
+    /*
+     * CPU32 only: a level 7 request edge has been seen and not yet
+     * serviced (level 7 is transition sensitive, CPU32RM 6.2.11).
+     */
+    bool nmi_pending;
+    /*
+     * CPU32 only: halted after a double bus fault (bus or address error
+     * during bus/address error or reset exception processing,
+     * CPU32RM 6.2.2/6.2.3).  Only reset restarts the processor.
+     */
+    bool double_fault;
+    /* CPU32 only: set while an exception stack frame is being built. */
+    bool in_exception;
+
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;
 
@@ -283,6 +297,29 @@ typedef enum {
 #define M68K_BA_SIZE_WORD    0x40
 #define M68K_BA_SIZE_LONG    0x00
 #define M68K_BA_SIZE_LINE    0x60
+
+/* CPU32 bus error special status word (CPU32RM 6.3) */
+#define CPU32_SSW_TP         0x8000  /* exception processing fault */
+#define CPU32_SSW_MV         0x4000  /* MOVEM in progress */
+#define CPU32_SSW_TR         0x1000  /* trace pending */
+#define CPU32_SSW_B1         0x0800
+#define CPU32_SSW_B0         0x0400
+#define CPU32_SSW_RR         0x0200  /* rerun released write on RTE */
+#define CPU32_SSW_RM         0x0100  /* read-modify-write */
+#define CPU32_SSW_IN         0x0080  /* instruction prefetch */
+#define CPU32_SSW_RW         0x0040  /* 1 = read */
+#define CPU32_SSW_LG         0x0020  /* original operand was long */
+#define CPU32_SSW_SIZ_LONG   0x0000
+#define CPU32_SSW_SIZ_BYTE   0x0008
+#define CPU32_SSW_SIZ_WORD   0x0010
+#define CPU32_SSW_SIZ_MASK   0x0018
+#define CPU32_SSW_FUNC_MASK  0x0007
+/*
+ * Microcode revision number stored in bits [15:8] of the internal
+ * transfer count register of format $C frames and checked by RTE
+ * (CPU32RM 6.4.3).  The value used by real silicon is not documented.
+ */
+#define CPU32_UCODE_REV      0x00
 
 /* bus access transfer type codes */
 #define M68K_BA_TT_MOVE16    0x08
@@ -556,6 +593,12 @@ enum m68k_features {
     M68K_FEATURE_EXCEPTION_FORMAT_VEC,
     /* LINK.L (680[2346]0, and CPU32) */
     M68K_FEATURE_LINKL,
+    /*
+     * CPU32 core (MC6833x/MC6837x): TBLx, LPSTOP, BGND, odd-address
+     * address errors, format $C bus/address error frames, RTE format
+     * checks, edge-triggered level 7 interrupt.
+     */
+    M68K_FEATURE_CPU32,
 };
 
 static inline bool m68k_feature(CPUM68KState *env, int feature)
@@ -564,6 +607,20 @@ static inline bool m68k_feature(CPUM68KState *env, int feature)
 }
 
 void register_m68k_insns (CPUM68KState *env);
+
+/*
+ * CPU32: is the pending interrupt request deliverable?  Levels 1-6 must
+ * exceed the mask; level 7 is non-maskable but transition sensitive
+ * (CPU32RM 6.2.11): it is taken once per request edge, and again when the
+ * mask is lowered below 7 while the request is still asserted.
+ */
+static inline bool m68k_cpu32_irq_ready(CPUM68KState *env)
+{
+    int mask = (env->sr & SR_I) >> SR_I_SHIFT;
+
+    return env->pending_level > mask ||
+           (env->pending_level == 7 && env->nmi_pending);
+}
 
 enum {
     /* 1 bit to define user level / supervisor access */
@@ -593,6 +650,9 @@ void m68k_cpu_transaction_failed(CPUState *cs, hwaddr physaddr, vaddr addr,
                                  unsigned size, MMUAccessType access_type,
                                  int mmu_idx, MemTxAttrs attrs,
                                  MemTxResult response, uintptr_t retaddr);
+G_NORETURN void m68k_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
+                                             MMUAccessType access_type,
+                                             int mmu_idx, uintptr_t retaddr);
 #endif
 
 /* TB flags */

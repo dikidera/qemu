@@ -170,8 +170,23 @@ static void raise_exception_ra(CPUM68KState *env, int tt, uintptr_t raddr)
     cpu_loop_exit_restore(cs, raddr);
 }
 
+/*
+ * CPU32RM MOVEC: the only control registers are SFC ($000), DFC ($001),
+ * USP ($800) and VBR ($801); "any other code causes an illegal
+ * instruction exception" (also CPU32RM 6.2.8).
+ */
+static bool cpu32_bad_creg(CPUM68KState *env, uint32_t reg)
+{
+    return m68k_feature(env, M68K_FEATURE_CPU32) &&
+           reg != M68K_CR_SFC && reg != M68K_CR_DFC &&
+           reg != M68K_CR_USP && reg != M68K_CR_VBR;
+}
+
 void HELPER(m68k_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
 {
+    if (cpu32_bad_creg(env, reg)) {
+        raise_exception_ra(env, EXCP_ILLEGAL, GETPC());
+    }
     switch (reg) {
     /* MC680[12346]0 */
     case M68K_CR_SFC:
@@ -296,6 +311,9 @@ void HELPER(m68k_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
 
 uint32_t HELPER(m68k_movec_from)(CPUM68KState *env, uint32_t reg)
 {
+    if (cpu32_bad_creg(env, reg)) {
+        raise_exception_ra(env, EXCP_ILLEGAL, GETPC());
+    }
     switch (reg) {
     /* MC680[12346]0 */
     case M68K_CR_SFC:
@@ -945,6 +963,19 @@ void m68k_set_irq_level(M68kCPU *cpu, int level, uint8_t vector)
     CPUState *cs = CPU(cpu);
     CPUM68KState *env = &cpu->env;
 
+    if (m68k_feature(env, M68K_FEATURE_CPU32)) {
+        /*
+         * CPU32RM 6.2.11: "An NMI is generated each time the interrupt
+         * request level changes to level seven (regardless of priority
+         * mask value)".  Remember the edge; it is consumed when the
+         * level 7 interrupt is taken.
+         */
+        if (level == 7 && env->pending_level != 7) {
+            env->nmi_pending = true;
+        } else if (level != 7) {
+            env->nmi_pending = false;
+        }
+    }
     env->pending_level = level;
     env->pending_vector = vector;
     if (level) {

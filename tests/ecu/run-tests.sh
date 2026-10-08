@@ -76,4 +76,18 @@ if [ -x "$BUILD/qemu-system-m32c" ]; then
     check m32c-cpu "$TMP/m32ccpu.out" "CPU OK"
 fi
 
+if [ -x "$BUILD/qemu-system-m68k" ]; then
+    # MC68376: SIM (clock, PIT, watchdog reset, ports, IRQ pins, CSBOOT),
+    # SRAM/TPURAM relocation, IMB arbitration, SCI and QSPI
+    python3 "$HERE/mc68376_test_rom.py" "$TMP/mc68376.bin" || exit 1
+    run qemu-system-m68k ecu-mc68376 "$TMP/mc68376.bin" mc68376 \
+        -machine canbus0=can0
+    for p in "MC68376 BOOT RSR=40 SIMCR=00CF" "SRAM OK" "TPURAM OK" \
+             "PE=A5 PF=5A" "IRQ2 OK" "QSPI=1234" "MIRROR OK" \
+             "SPURIOUS OK" "SCI IRQ OK" "PIT OK" "RATE OK" "WDT TEST" \
+             "MC68376 BOOT RSR=20" "DONE"; do
+        check mc68376 "$TMP/mc68376.out" "$p"
+    done
+fi
+
 exit $fail

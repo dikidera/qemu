@@ -46,3 +46,15 @@ config M68K_VIRT
     select GOLDFISH_TTY
     select GOLDFISH_RTC
     select VIRTIO_MMIO
+
+config CPU32_TEST
+    bool
+    default y
+    depends on M68K
+
+config ECU_MC68376
+    bool
+    default y
+    depends on M68K
+    select ECU_ENGINE
+    select CAN_BUS

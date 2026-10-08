@@ -1,7 +1,7 @@
 .. _ecu-emulator:
 
-ECU emulation (SH-2/SH-2E and M32C/87)
-======================================
+ECU emulation (SH-2/SH-2E, M32C/87 and MC68376)
+===============================================
 
 .. note::
 
@@ -23,29 +23,34 @@ Building
 
 ::
 
-    ./configure --target-list=sh4eb-softmmu,m32c-softmmu
+    ./configure --target-list=sh4eb-softmmu,m32c-softmmu,m68k-softmmu
     make
 
 ``qemu-system-sh4eb`` provides the SH-2/SH-2E machines (the SH705x parts
-are big endian), ``qemu-system-m32c`` the M32C/87 machine.
+are big endian), ``qemu-system-m32c`` the M32C/87 machine and
+``qemu-system-m68k`` the MC68376 machine.
 
 Machines
 --------
 
-============== ========================= ========== ============ =========
-Machine        MCU / core                Flash      RAM          CAN
-============== ========================= ========== ============ =========
-``ecu-sh7052`` SH7052, SH-2              256 KiB @0 12 KiB        1x HCAN
-                                                    @FFFF8000
-``ecu-sh7054`` SH7054, SH-2              384 KiB @0 16 KiB        1x HCAN
-                                                    @FFFF8000
-``ecu-sh7055`` SH7055, SH-2E (FPU)       512 KiB @0 32 KiB        2x HCAN
-                                                    @FFFF6000
-``ecu-sh7058`` SH7058, SH-2E (FPU)       1 MiB @0   48 KiB        2x HCAN2
-                                                    @FFFF0000
-``ecu-m32c87`` M32C/87, M32C/80 core     1 MiB at   48 KiB @400   2x CAN
-                                         top of 16M
-============== ========================= ========== ============ =========
+================ ========================= ========== ============ =========
+Machine          MCU / core                Flash      RAM          CAN
+================ ========================= ========== ============ =========
+``ecu-sh7052``   SH7052, SH-2              256 KiB @0 12 KiB        1x HCAN
+                                                      @FFFF8000
+``ecu-sh7054``   SH7054, SH-2              384 KiB @0 16 KiB        1x HCAN
+                                                      @FFFF8000
+``ecu-sh7055``   SH7055, SH-2E (FPU)       512 KiB @0 32 KiB        2x HCAN
+                                                      @FFFF6000
+``ecu-sh7058``   SH7058, SH-2E (FPU)       1 MiB @0   48 KiB        2x HCAN2
+                                                      @FFFF0000
+``ecu-m32c87``   M32C/87, M32C/80 core     1 MiB at   48 KiB @400   2x CAN
+                                           top of 16M
+``ecu-mc68376``  MC68376, CPU32            external,  4 KiB SRAM +  1x TouCAN
+                                           512 KiB on 3.5 KiB
+                                           CSBOOT @0  TPURAM,
+                                                      relocatable
+================ ========================= ========== ============ =========
 
 The firmware is a raw dump of the internal flash, given with ``-bios``::
 
@@ -56,13 +61,15 @@ The firmware is a raw dump of the internal flash, given with ``-bios``::
         -serial stdio -monitor telnet::4444,server,nowait
 
 For the SH705x the reset vector (PC at 0, SP at 4) is taken from the
-image.  For the M32C/87 the image is mapped so that it ends at 0xFFFFFF
+image, likewise for the MC68376 (SSP at 0, PC at 4: the image is the
+external boot flash that the CSBOOT chip select maps at 0 after reset;
+size ``-global mc68376-soc.flash-size=...``, default 512 KiB).  For the M32C/87 the image is mapped so that it ends at 0xFFFFFF
 (reset vector at 0xFFFFFC); use ``-global m32c87-soc.rom-size=0x80000``
 etc. for smaller flash parts.
 
 The new CPU models are listed by ``-cpu help`` as ``sh2``/``sh2e``
-(target ``sh4eb``) and ``m32c80`` (target ``m32c``); the ECU machines
-pick the right one for their MCU.
+(target ``sh4eb``), ``m32c80`` (target ``m32c``) and ``cpu32`` (target
+``m68k``); the ECU machines pick the right one for their MCU.
 
 Peripheral clock
 ~~~~~~~~~~~~~~~~
@@ -240,6 +247,22 @@ M32C/87:
   ``TB5IN``
 * ports ``P0_0``..``P15_7``, interrupts ``INT0``..``INT5``, ``NMI``
 
+MC68376 (the TPU, CTM4 and QADC names are registered by those models):
+
+* analog inputs ``AN0``..``AN3`` and ``AN48``..``AN59`` (QADC channel
+  numbers, Table 5-16)
+* TPU channels ``TPU0``..``TPU15``; CTM4 PWM ``CPWM5``..``CPWM8``
+* SIM ports ``PE0``..``PE7``, ``PF0``..``PF7``, ``PC0``..``PC6``;
+  interrupt pins ``IRQ1``..``IRQ7`` (the same pins as ``PF1``..``PF7``:
+  a pin reads low when either of its names is driven low; both idle
+  high)
+* QSM port ``PQS0``..``PQS7`` (MISO, MOSI, SCK, PCS0/SS, PCS1-3, TXD)
+
+The MC68376 default bindings (crank/cam/vss on ``TPU0``-``TPU2``,
+injectors on ``TPU4``-``TPU7``, coils on ``TPU8``-``TPU11``, actuators on
+``CPWM5``-``CPWM8``, sensors on ``AN0``-``AN3``/``AN48``-``AN59``) are
+placeholders; every ECU uses its own TPU function assignment.
+
 A signal may be bound to several pins, e.g. the crank to both the timer
 input and the port pin the firmware polls (``bind crank TI10+PF1``).
 
@@ -305,6 +328,97 @@ General
   Watchdog resets can be disabled with ``-global sh705x-soc.wdt-reset=off``
   / ``m32c87-soc.wdt-reset=off``.
 
+MC68376
+-------
+
+Reference: MC68336/376 User's Manual (MC68336376UM/D); section numbers
+below refer to it.  Mode select pins at reset are assumed in their
+default (pulled-up) state: 16-bit CSBOOT, CS[10:0] as chip selects,
+port E/F pins as bus control/IRQ pins, MODCLK high (PLL on), no BDM.
+Options: ``-global mc68376-soc.<prop>=...``.
+
+Clock (5.3)
+  ``fsys = fref / 128 * 4 (Y+1) 2^(2W+X)`` from ``SYNCR``; ``fref`` is
+  the ``extal-hz`` property (default 4.194304 MHz, the manual's typical
+  crystal, 5.3.1).  Reset ``SYNCR`` = $3F00 gives 8.39 MHz;
+  ECUs usually program 16.78 MHz ($7F00) or 20.97 MHz.  The VCO locks
+  instantly (``SLOCK`` reads 1).  Other modules read the clock with
+  ``mc68376_sysclk_hz()`` and can register a change notifier.
+
+Address map (5.2.1, 5.9, 6, 7, 12)
+  24-bit bus mirrored over the 4 GiB CPU space.  The module block is at
+  $FFF000 (``SIMCR.MM`` = 1, reset) or $7FF000; ``MM`` is write-once.
+  Real aliases cover $00000000 and $FF000000 (absolute short addresses);
+  the other 254 mirrors are forwarded through an I/O region (data only,
+  no code execution).  Chip selects: CSBOOT decodes the boot flash
+  (``CSBARBT``/``CSORBT``, mirrored through the block when the flash is
+  smaller, up to 16 copies); optional external RAM
+  (``ext-ram-size``) is decoded by chip select ``ext-ram-cs`` or mapped
+  at ``ext-ram-base`` when ``ext-ram-cs`` = -1.  A chip select decodes
+  when its pin is assigned as a chip select, ``BYTE`` and ``R/W`` are not
+  "disable" and ``SPACE`` is not CPU space; byte-lane, read/write-only,
+  user/supervisor and wait-state options are not applied.  The other
+  chip selects are stored only (their pins are not modelled).
+
+SIM (5, D.2)
+  ``SIMCR`` (IARB used for the PIT and IRQ pins), ``SYNCR``, ``RSR``
+  (power-on, external, watchdog), ``SYPCR`` (write-once; software
+  watchdog per 5.4.5 with time-out ``128 x 2^n / fref``, service $55/$AA;
+  time-out resets the MCU and sets ``RSR.SW`` unless ``wdt-reset=off``;
+  bus/halt monitor fields are stored only), ``PICR``/``PITR`` (periodic
+  interrupt timer, ``128 x PITM x 4 (x512) / fref``; the request is
+  negated by the interrupt acknowledge), ports E, F, C, chip-select
+  registers; test registers are stored.  ``IRQ1``-``IRQ7`` are
+  level-sensitive and always autovectored (vector 24+n; an external
+  vector or chip-select AVEC needs external hardware), level 7 edge/NMI
+  behaviour is handled by the cpu32 core.
+
+Interrupt arbitration (5.8)
+  The highest level wins, then the highest IARB; on the interrupt
+  acknowledge the winning module supplies its vector.  A request whose
+  module has IARB = 0 gives the spurious interrupt exception (vector
+  24).  Equal IARB values (a programming error on the chip) resolve in
+  registration order (PIT before IRQ pins, QSPI before SCI).
+  User/supervisor restrictions (``SUPV``, ``RASP``, ``ASPC``) are not
+  enforced.
+
+Standby RAM, TPURAM and MRM (6, 12, 7)
+  SRAM: 4 KiB, in low-power stop at reset, base in ``RAMBAH``/``RAMBAL``
+  (writable only while stopped and unlocked).  TPURAM: 3.5 KiB, enabled
+  by the first (and only) ``TRAMBAR`` write unless it overlaps the module
+  block; inaccessible to the CPU in TPU emulation mode
+  (``mc68376_tpuram_set_emulation()``).  ``TRAMMCR.STOP`` resets to 0
+  as in the register diagram (D.9.1; the text in 12.7/12.8 says reset
+  sets it).  MRM: generic blank-ROM reset values (enabled at $FF0000,
+  ``BOOT`` = 1); the contents are factory masked and unknown, give an
+  image with ``mrm-image=file`` (otherwise $FF), ``mrm-enabled=off``
+  models DATA14 pulled low.  The bootstrap words are not used.
+
+QSM (9, D.6)
+  SCI on ``-serial`` 0 (``sci`` property): baud ``fsys / (32 SCBR)``,
+  10/11-bit frames, parity generation/check, TE preamble, the
+  read-SCSR-then-access-SCDR flag clearing, IDLE, receiver wake-up,
+  LOOPS, ``kline-echo``.  Received bytes are held back while RDR is full
+  (no overrun); break, noise and framing errors and the ninth data bit
+  are not modelled.  QSPI master mode: the queue runs with the programmed
+  SCK rate and delays, ``SPIF``/``HALTA``/``MODF``, wrap-around, HALT,
+  ``LOOPQ``; PCS pins are driven on the ``PQSn`` pins.  With no device
+  attached (``mc68376_qspi_attach()``) MISO reads as ones.  Slave mode
+  and ``QSMCR.STOP`` are not modelled.
+
+QADC (8)
+  Placeholder: register window only (accesses logged as unimplemented).
+
+CTM4 (10)
+  Placeholder: register window only (accesses logged as unimplemented).
+
+TPU (11)
+  Placeholder: register window only (accesses logged as unimplemented).
+
+TouCAN (13)
+  Placeholder: register window only (accesses logged as unimplemented).
+  Attached to ``-machine canbus0=<can-bus id>``.
+
 Debugging
 ---------
 
@@ -319,7 +433,8 @@ Tests
 -----
 
 ``tests/ecu/run-tests.sh [build-dir]`` assembles small test ROMs
-(``tests/ecu/shasm.py``, ``tests/ecu/m32casm.py``) and checks serial
+(``tests/ecu/shasm.py``, ``tests/ecu/m32casm.py``,
+``tests/ecu/m68kasm.py``) and checks serial
 output, A/D readings, interrupts, CAN transmit/receive and the injector
 and coil pulse measurements on every machine, plus an M32C instruction
 self test.

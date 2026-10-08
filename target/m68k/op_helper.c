@@ -80,6 +80,113 @@ throwaway:
     cpu_m68k_set_sr(env, sr);
 }
 
+/*
+ * CPU32 RTE (CPU32RM 6.2.12, 6.4).  The CPU32 only generates format $0,
+ * $2 and $C frames, and RTE accepts only those.  (The RTE instruction
+ * page, 4-137, lists the MC68020 formats $1/$9/$A/$B; that page is
+ * evidently copied from the MC68020 documentation and contradicts
+ * section 6.4, "The CPU32 generates three different stack frames".
+ * Format $1 is meaningless without a master stack pointer.)
+ * Returns false if the frame is invalid: a format error must be taken.
+ */
+static bool cpu32_rte(CPUM68KState *env)
+{
+    uint32_t sp = env->aregs[7];
+    uint16_t sr, fmt;
+    uint32_t pc;
+
+    sr = cpu_lduw_be_mmuidx_ra(env, sp, MMU_KERNEL_IDX, 0);
+    pc = cpu_ldl_be_mmuidx_ra(env, sp + 2, MMU_KERNEL_IDX, 0);
+    fmt = cpu_lduw_be_mmuidx_ra(env, sp + 6, MMU_KERNEL_IDX, 0);
+
+    switch (fmt >> 12) {
+    case 0x0:   /* four-word frame */
+        sp += 8;
+        break;
+    case 0x2:   /* six-word frame */
+        sp += 12;
+        break;
+    case 0xc: { /* twelve-word bus error frame */
+        uint16_t itcr = cpu_lduw_be_mmuidx_ra(env, sp + 0x14,
+                                              MMU_KERNEL_IDX, 0);
+        uint16_t ssw = cpu_lduw_be_mmuidx_ra(env, sp + 0x16,
+                                             MMU_KERNEL_IDX, 0);
+
+        /* "the version number on the stack must match" (6.2.12) */
+        if ((itcr >> 8) != CPU32_UCODE_REV) {
+            return false;
+        }
+        /*
+         * This model only builds type II (TP:MV = 00) frames: the
+         * faulted instruction is restarted at the stacked return PC.
+         * Type III (MOVEM continuation) and type IV (fault during
+         * exception stacking) frames carry internal state that is not
+         * modelled, so they are rejected with a format error.
+         */
+        if (ssw & (CPU32_SSW_TP | CPU32_SSW_MV)) {
+            qemu_log_mask(LOG_UNIMP, "cpu32: RTE of format $C frame with "
+                          "SSW %04x (TP/MV set) not supported\n", ssw);
+            return false;
+        }
+        if (ssw & CPU32_SSW_RR) {
+            /*
+             * 6.3.2.2: RR set -> rerun the released write using the
+             * stacked fault address, DBUF, SIZ and FUNC.
+             */
+            uint32_t addr = cpu_ldl_be_mmuidx_ra(env, sp + 8,
+                                                 MMU_KERNEL_IDX, 0);
+            uint32_t dbuf = cpu_ldl_be_mmuidx_ra(env, sp + 0xc,
+                                                 MMU_KERNEL_IDX, 0);
+            int idx = (ssw & 4) ? MMU_KERNEL_IDX : MMU_USER_IDX;
+
+            switch (ssw & CPU32_SSW_SIZ_MASK) {
+            case CPU32_SSW_SIZ_BYTE:
+                cpu_stb_mmuidx_ra(env, addr, dbuf, idx, 0);
+                break;
+            case CPU32_SSW_SIZ_WORD:
+                cpu_stw_be_mmuidx_ra(env, addr, dbuf, idx, 0);
+                break;
+            default:
+                cpu_stl_be_mmuidx_ra(env, addr, dbuf, idx, 0);
+                break;
+            }
+        }
+        sp += 24;
+        break;
+    }
+    default:
+        return false;
+    }
+    env->aregs[7] = sp;
+    cpu_m68k_set_sr(env, sr);
+    env->pc = pc;
+    return true;
+}
+
+/* SSW function code field for an access (CPU32RM table 5-1) */
+static uint16_t cpu32_ssw_func(int mmu_idx, MMUAccessType access_type)
+{
+    return (mmu_idx == MMU_USER_IDX ? 0 : 4) |
+           (access_type == MMU_INST_FETCH ? 2 : 1);
+}
+
+/*
+ * CPU32 double bus fault: halt until reset (CPU32RM 6.2.2, 6.2.3).
+ */
+G_NORETURN static void cpu32_double_fault(CPUM68KState *env,
+                                          const char *why)
+{
+    CPUState *cs = env_cpu(env);
+
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "cpu32: double bus fault (%s), processor halted\n", why);
+    env->double_fault = true;
+    env->in_exception = false;
+    cs->halted = 1;
+    cs->exception_index = EXCP_HLT;
+    cpu_loop_exit(cs);
+}
+
 static const char *m68k_exception_name(int index)
 {
     switch (index) {
@@ -292,6 +399,62 @@ static inline void do_stack_frame(CPUM68KState *env, uint32_t *sp,
     cpu_stw_be_mmuidx_ra(env, *sp, sr, MMU_KERNEL_IDX, 0);
 }
 
+/*
+ * CPU32 exception stack frames (CPU32RM 6.4):
+ *  $0 four-word: interrupt, format error, TRAP #n, illegal, A/F-line,
+ *     privilege violation (and BKPT/BGND taken as illegal);
+ *  $2 six-word: CHK, CHK2, TRAPcc, TRAPV, zero divide, trace; the extra
+ *     long word is the address of the faulted instruction (env->mmu.ar);
+ *  $C twelve-word: bus error (vector 2) and address error (vector 3).
+ */
+static void cpu32_stack_frame(CPUM68KState *env, uint32_t *sp,
+                              uint16_t oldsr)
+{
+    CPUState *cs = env_cpu(env);
+
+    switch (cs->exception_index) {
+    case EXCP_ACCESS:
+    case EXCP_ADDRESS:
+        /*
+         * Figure 6-6 (type II fault: prefetch or operand).  Every fault
+         * is reported as type II, i.e. the instruction is aborted and
+         * restarted by RTE: return PC and current instruction PC are
+         * both the address of the faulted instruction (for an odd
+         * instruction fetch, the odd address, 6.2.3).  The CPU32
+         * reports bus errors on operand writes as released-write
+         * (type I) faults taken at the next instruction boundary; QEMU
+         * aborts the instruction instead, so RR is never set.  DBUF is
+         * not available and is stacked as zero.
+         */
+        *sp -= 2;
+        cpu_stw_be_mmuidx_ra(env, *sp, env->mmu.ssw, MMU_KERNEL_IDX, 0);
+        *sp -= 2;
+        cpu_stw_be_mmuidx_ra(env, *sp, CPU32_UCODE_REV << 8,
+                             MMU_KERNEL_IDX, 0);
+        *sp -= 4;
+        cpu_stl_be_mmuidx_ra(env, *sp, env->pc, MMU_KERNEL_IDX, 0);
+        *sp -= 4;
+        cpu_stl_be_mmuidx_ra(env, *sp, 0, MMU_KERNEL_IDX, 0);
+        *sp -= 4;
+        cpu_stl_be_mmuidx_ra(env, *sp, env->mmu.ar, MMU_KERNEL_IDX, 0);
+        do_stack_frame(env, sp, 0xc, oldsr, 0, env->pc);
+        if (qemu_loglevel_mask(CPU_LOG_INT)) {
+            qemu_log("            ssw: %04x fault address: %08x\n",
+                     env->mmu.ssw, env->mmu.ar);
+        }
+        break;
+    case EXCP_CHK:
+    case EXCP_DIV0:
+    case EXCP_TRACE:
+    case EXCP_TRAPCC:
+        do_stack_frame(env, sp, 2, oldsr, env->mmu.ar, env->pc);
+        break;
+    default:
+        do_stack_frame(env, sp, 0, oldsr, 0, env->pc);
+        break;
+    }
+}
+
 static void m68k_interrupt_all(CPUM68KState *env, int is_hw)
 {
     CPUState *cs = env_cpu(env);
@@ -299,13 +462,25 @@ static void m68k_interrupt_all(CPUM68KState *env, int is_hw)
     uint32_t vector;
     uint16_t sr, oldsr;
     uint64_t last_pc = env->pc;
+    bool cpu32 = m68k_feature(env, M68K_FEATURE_CPU32);
 
     if (!is_hw) {
         switch (cs->exception_index) {
         case EXCP_RTE:
             /* Return from an exception.  */
-            m68k_rte(env);
-            return;
+            if (!cpu32) {
+                m68k_rte(env);
+                return;
+            }
+            if (cpu32_rte(env)) {
+                return;
+            }
+            /*
+             * CPU32RM 6.2.7/6.2.12: format error, four-word frame below
+             * the faulty frame, stacked PC = address of the RTE.
+             */
+            cs->exception_index = EXCP_FORMAT;
+            break;
         }
     }
 
@@ -330,17 +505,40 @@ static void m68k_interrupt_all(CPUM68KState *env, int is_hw)
     /* "suppress tracing" */
     sr &= ~SR_T;
     /* "sets the processor interrupt mask" */
-    if (is_hw) {
+    if (is_hw && cpu32) {
+        /*
+         * CPU32RM 6.2.11: "priority level is set to the level of the
+         * interrupt" (replace the mask, do not OR it in).
+         */
+        sr = (sr & ~SR_I) | (env->pending_level << SR_I_SHIFT);
+        if (env->pending_level == 7) {
+            env->nmi_pending = false;
+        }
+    } else if (is_hw) {
         sr |= (env->sr & ~SR_I) | (env->pending_level << SR_I_SHIFT);
     }
     cpu_m68k_set_sr(env, sr);
     sp = env->aregs[7];
 
+    if (cpu32) {
+        /*
+         * A stacking fault on an odd SSP is an address error during
+         * exception processing: double bus fault.
+         */
+        if (sp & 1) {
+            cpu32_double_fault(env, "odd supervisor stack pointer");
+        }
+        env->in_exception = true;
+    }
+
     if (!m68k_feature(env, M68K_FEATURE_UNALIGNED_DATA)) {
         sp &= ~1;
     }
 
-    switch (cs->exception_index) {
+    if (cpu32) {
+        cpu32_stack_frame(env, &sp, oldsr);
+    } else switch (cs->exception_index) {
+
     case EXCP_ACCESS:
         if (env->mmu.fault) {
             cpu_abort(cs, "DOUBLE MMU FAULT\n");
@@ -439,6 +637,7 @@ static void m68k_interrupt_all(CPUM68KState *env, int is_hw)
     env->aregs[7] = sp;
     /* Jump to vector.  */
     env->pc = cpu_ldl_be_mmuidx_ra(env, env->vbr + vector, MMU_KERNEL_IDX, 0);
+    env->in_exception = false;
 
     do_plugin_vcpu_interrupt_cb(cs, last_pc);
 }
@@ -468,6 +667,31 @@ void m68k_cpu_transaction_failed(CPUState *cs, hwaddr physaddr, vaddr addr,
                                  MemTxResult response, uintptr_t retaddr)
 {
     CPUM68KState *env = cpu_env(cs);
+
+    if (m68k_feature(env, M68K_FEATURE_CPU32)) {
+        /*
+         * CPU32RM 6.2.2: bus error.  A bus error while building an
+         * exception frame or fetching a vector halts the processor;
+         * the type IV (TP=1) frame for faults during four/six-word frame
+         * stacking is not modelled.
+         */
+        if (env->in_exception) {
+            cpu32_double_fault(env, "bus error during exception processing");
+        }
+        cpu_restore_state(cs, retaddr);
+        env->mmu.ar = addr;
+        env->mmu.ssw = cpu32_ssw_func(mmu_idx, access_type) |
+            (access_type == MMU_INST_FETCH ? CPU32_SSW_IN : 0) |
+            (access_type != MMU_DATA_STORE ? CPU32_SSW_RW : 0) |
+            (size == 1 ? CPU32_SSW_SIZ_BYTE :
+             size == 2 ? CPU32_SSW_SIZ_WORD : CPU32_SSW_SIZ_LONG) |
+            (size == 4 ? CPU32_SSW_LG : 0);
+        if (access_type == MMU_INST_FETCH) {
+            env->mmu.ar = env->pc;
+        }
+        cs->exception_index = EXCP_ACCESS;
+        cpu_loop_exit(cs);
+    }
 
     cpu_restore_state(cs, retaddr);
 
@@ -518,9 +742,44 @@ void m68k_cpu_transaction_failed(CPUState *cs, hwaddr physaddr, vaddr addr,
     }
 }
 
+/*
+ * CPU32 address error on an odd word/long operand access (CPU32RM 6.2.3).
+ * Only reached for accesses generated with MO_ALIGN_2, which translate.c
+ * uses for the CPU32 only.  The TCG hook does not report the operand
+ * size, so SIZ is reported as word.
+ */
+void m68k_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
+                                  MMUAccessType access_type,
+                                  int mmu_idx, uintptr_t retaddr)
+{
+    CPUM68KState *env = cpu_env(cs);
+
+    if (env->in_exception) {
+        cpu32_double_fault(env, "address error during exception processing");
+    }
+    cpu_restore_state(cs, retaddr);
+    env->mmu.ar = addr;
+    env->mmu.ssw = cpu32_ssw_func(mmu_idx, access_type) |
+        (access_type == MMU_INST_FETCH ? CPU32_SSW_IN : 0) |
+        (access_type != MMU_DATA_STORE ? CPU32_SSW_RW : 0) |
+        CPU32_SSW_SIZ_WORD;
+    cs->exception_index = EXCP_ADDRESS;
+    cpu_loop_exit(cs);
+}
+
 bool m68k_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     CPUM68KState *env = cpu_env(cs);
+
+    if (m68k_feature(env, M68K_FEATURE_CPU32)) {
+        if ((interrupt_request & CPU_INTERRUPT_HARD) &&
+            !env->double_fault && m68k_cpu32_irq_ready(env)) {
+            cs->exception_index = env->pending_vector;
+            do_interrupt_m68k_hardirq(env);
+            return true;
+        }
+        return false;
+    }
 
     if (interrupt_request & CPU_INTERRUPT_HARD
         && ((env->sr & SR_I) >> SR_I_SHIFT) < env->pending_level) {
@@ -1134,4 +1393,78 @@ void HELPER(cmp2)(CPUM68KState *env, int32_t val, int32_t lb, int32_t ub)
     /* Identical to CHK2 (above) but doesn't raise an exception */
     env->cc_z = val != lb && val != ub;
     env->cc_c = lb <= ub ? val < lb || val > ub : val > ub && val < lb;
+}
+
+/*
+ * CPU32 TBLU/TBLUN/TBLS/TBLSN (CPU32RM 4-171..4-178, 4.6).
+ * dx holds the interpolation fraction in [7:0]; y0/y1 are ENTRY(n) and
+ * ENTRY(n + 1) (table entries or the Dym/Dyn registers).
+ * mode: [1:0] size (0 byte, 1 word, 2 long), [2] signed, [3] rounded.
+ *
+ * Unrounded: ENTRY(n) * 256 + (ENTRY(n+1) - ENTRY(n)) * Dx[7:0] -> Dx,
+ *   the 8-bit fraction in Dx[7:0]; byte and word results sign (TBLSN) or
+ *   zero (TBLUN) extended to 32 bits, a long result keeps the low 24
+ *   integer bits.
+ * Rounded: ENTRY(n) + round((ENTRY(n+1) - ENTRY(n)) * Dx[7:0] / 256),
+ *   only the low byte/word/long of Dx is written.  Rounding of the
+ *   adjusted difference follows the tables in the instruction pages:
+ *   TBLS: n <= -1/2 -> -1, -1/2 < n < 1/2 -> 0, n >= 1/2 -> +1, i.e.
+ *   round half away from zero;  TBLU: n < 1/2 -> 0, n >= 1/2 -> +1.
+ *   The manual does not say how a negative difference (decreasing
+ *   unsigned table) is rounded by TBLU; it is treated here as the
+ *   two's complement fraction of the full result, i.e. round half up
+ *   ((x + 128) >> 8), which reproduces the manual's example 3.
+ * Condition codes: X unaffected, N = MSB of the result, Z = result zero,
+ *   V = integer part of an unrounded long result out of range
+ *   (TBLSN: -2^23..2^23-1, TBLUN: 0..2^24-1), else 0; C = 0.
+ *   For the unrounded forms "the result" is taken as the full 32-bit
+ *   register value written.
+ */
+uint32_t HELPER(cpu32_tbl)(CPUM68KState *env, uint32_t dx, uint32_t y0,
+                           uint32_t y1, uint32_t mode)
+{
+    int size = mode & 3;
+    bool sgn = mode & 4;
+    bool rnd = mode & 8;
+    int bits = 8 << size;
+    uint32_t mask = bits == 32 ? 0xffffffff : (1u << bits) - 1;
+    int64_t e0, e1, p, res;
+    uint32_t out;
+
+    if (sgn) {
+        e0 = sextract64(y0, 0, bits);
+        e1 = sextract64(y1, 0, bits);
+    } else {
+        e0 = extract64(y0, 0, bits);
+        e1 = extract64(y1, 0, bits);
+    }
+    p = (e1 - e0) * (int64_t)(dx & 0xff);
+
+    env->cc_c = 0;
+    env->cc_v = 0;
+    if (rnd) {
+        int64_t adj;
+
+        if (sgn) {
+            adj = p >= 0 ? (p + 128) >> 8 : -((-p + 128) >> 8);
+        } else {
+            adj = (p + 128) >> 8;
+        }
+        res = e0 + adj;
+        out = (dx & ~mask) | ((uint32_t)res & mask);
+        env->cc_n = (uint32_t)res << (32 - bits);
+        env->cc_z = (uint32_t)res & mask;
+    } else {
+        res = e0 * 256 + p;
+        out = (uint32_t)res;
+        if (size == 2) {
+            if (sgn ? (res < INT32_MIN || res > INT32_MAX)
+                    : (res < 0 || res > UINT32_MAX)) {
+                env->cc_v = -1;
+            }
+        }
+        env->cc_n = out;
+        env->cc_z = out;
+    }
+    return out;
 }

@@ -26,6 +26,8 @@
 #ifndef CONFIG_USER_ONLY
 #include "migration/vmstate.h"
 #include "monitor/hmp.h"
+#include "hw/core/loader.h"
+#include "exec/cpu-common.h"
 #endif
 
 #include "cpu.h"
@@ -78,6 +80,21 @@ static void m68k_restore_state_to_opc(CPUState *cs,
 #ifndef CONFIG_USER_ONLY
 static bool m68k_cpu_has_work(CPUState *cs)
 {
+    CPUM68KState *env = cpu_env(cs);
+
+    if (m68k_feature(env, M68K_FEATURE_CPU32)) {
+        /*
+         * CPU32RM 5.1/6.2.2: a processor halted by a double bus fault is
+         * only restarted by reset.  A stopped processor (STOP/LPSTOP)
+         * resumes only for an interrupt above the mask (or an NMI edge);
+         * other requests are ignored (LPSTOP description, 4-xx).
+         */
+        if (env->double_fault) {
+            return false;
+        }
+        return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) &&
+               m68k_cpu32_irq_ready(env);
+    }
     return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD);
 }
 #endif /* !CONFIG_USER_ONLY */
@@ -178,6 +195,28 @@ static void m68k_cpu_reset_hold(Object *obj, ResetType type)
 
     /* TODO: We should set PC from the interrupt vector.  */
     env->pc = 0;
+
+#ifndef CONFIG_USER_ONLY
+    if (m68k_feature(env, M68K_FEATURE_CPU32) && cs->as) {
+        /*
+         * CPU32RM 6.2.1: reset sets S, clears T1/T0, sets the interrupt
+         * mask to 7 (done above), clears VBR (memset above), loads SSP
+         * from vector 0 and PC from vector 1 (supervisor program space
+         * at address 0).  The boot ROM may not have been copied into
+         * guest memory yet at this point, so look in the ROM blobs first
+         * (same approach as the ARMv7-M reset).
+         */
+        uint8_t *rom = rom_ptr_for_as(cs->as, 0, 8);
+
+        if (rom) {
+            env->aregs[7] = ldl_be_p(rom);
+            env->pc = ldl_be_p(rom + 4);
+        } else {
+            env->aregs[7] = ldl_be_phys(cs->as, 0);
+            env->pc = ldl_be_phys(cs->as, 4);
+        }
+    }
+#endif
 }
 
 static void m68k_cpu_disas_set_info(const CPUState *cs, disassemble_info *info)
@@ -298,6 +337,40 @@ static void m68010_cpu_initfn(Object *obj)
     m68k_set_feature(env, M68K_FEATURE_MOVEC);
     m68k_set_feature(env, M68K_FEATURE_MOVEFROMSR_PRIV);
     m68k_set_feature(env, M68K_FEATURE_EXCEPTION_FORMAT_VEC);
+}
+
+/*
+ * Motorola CPU32 (MC68330/331/332/333/334/336/338/340/349/376 ...).
+ *
+ * CPU32RM 1.x / 4.x instruction set summary: the MC68010 instruction set
+ * and supervisor model (USP/SSP only, VBR, SFC/DFC, MOVEC, MOVES, RTD,
+ * BKPT, format/vector exception frames, privileged MOVE from SR) plus,
+ * from the MC68020: 32-bit MULx.L/DIVx.L (and 64-bit forms), Bcc.L,
+ * CHK2/CMP2, TRAPcc, LINK.L, EXTB.L and the scaled-index / base
+ * displacement indexed addressing modes (full extension word format,
+ * but no memory indirection: CPU32RM figure 3-2 note and 6.2.8 make
+ * I/IS != 0, BD SIZE == 0 or bit 3 set an illegal instruction).
+ * New: TBLU/TBLUN/TBLS/TBLSN, LPSTOP, BGND.
+ * Not present: bitfield ops, CAS/CAS2, CALLM/RTM, PACK/UNPK, coprocessor
+ * (FPU) instructions, MSP/ISP, CACR, MMU.  Word and long operands and
+ * instruction fetches at odd addresses cause an address error
+ * (CPU32RM 6.2.3), so M68K_FEATURE_UNALIGNED_DATA is not set.
+ */
+static void cpu32_cpu_initfn(Object *obj)
+{
+    CPUM68KState *env = cpu_env(CPU(obj));
+
+    m68010_cpu_initfn(obj);
+    m68k_set_feature(env, M68K_FEATURE_CPU32);
+    m68k_set_feature(env, M68K_FEATURE_LONG_MULDIV);
+    m68k_set_feature(env, M68K_FEATURE_QUAD_MULDIV);
+    m68k_set_feature(env, M68K_FEATURE_BRAL);
+    m68k_set_feature(env, M68K_FEATURE_BCCL);
+    m68k_set_feature(env, M68K_FEATURE_EXT_FULL);
+    m68k_set_feature(env, M68K_FEATURE_SCALED_INDEX);
+    m68k_set_feature(env, M68K_FEATURE_CHK2);
+    m68k_set_feature(env, M68K_FEATURE_TRAPCC);
+    m68k_set_feature(env, M68K_FEATURE_LINKL);
 }
 
 /*
@@ -636,6 +709,28 @@ const VMStateDescription vmstate_68040_spregs = {
     }
 };
 
+static bool cpu32_needed(void *opaque)
+{
+    M68kCPU *s = opaque;
+
+    return m68k_feature(&s->env, M68K_FEATURE_CPU32);
+}
+
+static const VMStateDescription vmstate_cpu32 = {
+    .name = "cpu/cpu32",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = cpu32_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(env.vbr, M68kCPU),
+        VMSTATE_UINT32(env.sfc, M68kCPU),
+        VMSTATE_UINT32(env.dfc, M68kCPU),
+        VMSTATE_BOOL(env.nmi_pending, M68kCPU),
+        VMSTATE_BOOL(env.double_fault, M68kCPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_m68k_cpu = {
     .name = "cpu",
     .version_id = 1,
@@ -662,6 +757,7 @@ static const VMStateDescription vmstate_m68k_cpu = {
         &vmstate_cf_spregs,
         &vmstate_68040_mmu,
         &vmstate_68040_spregs,
+        &vmstate_cpu32,
         NULL
     },
 };
@@ -714,6 +810,7 @@ static const TCGCPUOps m68k_tcg_ops = {
     .cpu_exec_reset = cpu_reset,
     .do_interrupt = m68k_cpu_do_interrupt,
     .do_transaction_failed = m68k_cpu_transaction_failed,
+    .do_unaligned_access = m68k_cpu_do_unaligned_access,
 #endif /* !CONFIG_USER_ONLY */
 };
 
@@ -790,6 +887,7 @@ static const TypeInfo m68k_cpus_type_infos[] = {
     DEFINE_M68K_CPU_TYPE_M68K(m68030),
     DEFINE_M68K_CPU_TYPE_M68K(m68040),
     DEFINE_M68K_CPU_TYPE_M68K(m68060),
+    DEFINE_M68K_CPU_TYPE_M68K(cpu32),
     DEFINE_M68K_CPU_TYPE_CF(m5206),
     DEFINE_M68K_CPU_TYPE_CF(m5208),
     DEFINE_M68K_CPU_TYPE_CF(cfv4e),

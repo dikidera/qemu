@@ -282,7 +282,28 @@ static void gen_exception(DisasContext *s, uint32_t dest, int nr)
 
 static inline void gen_addr_fault(DisasContext *s)
 {
+    /*
+     * Invalid addressing modes.  The CPU32 raises an illegal instruction
+     * exception for these (CPU32RM 6.2.8); its address error exception
+     * is reserved for odd word/long/instruction addresses.
+     */
+    if (m68k_feature(s->env, M68K_FEATURE_CPU32)) {
+        gen_exception(s, s->base.pc_next, EXCP_ILLEGAL);
+        return;
+    }
     gen_exception(s, s->base.pc_next, EXCP_ADDRESS);
+}
+
+/*
+ * CPU32: word and long operand accesses at odd addresses cause an address
+ * error (CPU32RM 6.2.3); see m68k_cpu_do_unaligned_access().
+ */
+static inline MemOp m68k_align(DisasContext *s, int opsize)
+{
+    if (opsize != OS_BYTE && m68k_feature(s->env, M68K_FEATURE_CPU32)) {
+        return MO_ALIGN_2;
+    }
+    return 0;
 }
 
 /*
@@ -299,7 +320,8 @@ static inline TCGv gen_load(DisasContext *s, int opsize, TCGv addr,
     case OS_WORD:
     case OS_LONG:
         tcg_gen_qemu_ld_tl(tmp, addr, index,
-                           opsize | (sign ? MO_SIGN : 0) | MO_TE);
+                           opsize | (sign ? MO_SIGN : 0) | MO_TE |
+                           m68k_align(s, opsize));
         break;
     default:
         g_assert_not_reached();
@@ -315,7 +337,8 @@ static inline void gen_store(DisasContext *s, int opsize, TCGv addr, TCGv val,
     case OS_BYTE:
     case OS_WORD:
     case OS_LONG:
-        tcg_gen_qemu_st_tl(val, addr, index, opsize | MO_TE);
+        tcg_gen_qemu_st_tl(val, addr, index,
+                           opsize | MO_TE | m68k_align(s, opsize));
         break;
     default:
         g_assert_not_reached();
@@ -422,6 +445,15 @@ static TCGv gen_lea_indexed(CPUM68KState *env, DisasContext *s, TCGv base)
         /* full extension word format */
         if (!m68k_feature(s->env, M68K_FEATURE_EXT_FULL))
             return NULL_QREG;
+        /*
+         * CPU32RM figure 3-2 and 6.2.8: the CPU32 supports the full
+         * format with base displacement, but not memory indirection;
+         * BD SIZE = 00 or bits [3:0] != 0 make the instruction illegal.
+         */
+        if (m68k_feature(s->env, M68K_FEATURE_CPU32) &&
+            ((ext & 0x30) == 0 || (ext & 0xf) != 0)) {
+            return NULL_QREG;
+        }
 
         if ((ext & 0x30) > 0x10) {
             /* base displacement */
@@ -4665,6 +4697,108 @@ DISAS_INSN(trap)
     gen_exception(s, s->pc, EXCP_TRAP0 + (insn & 0xf));
 }
 
+/*
+ * CPU32 BGND (CPU32RM 4-41): enters background debug mode if enabled,
+ * otherwise takes an illegal instruction exception.  Background debug
+ * mode is not modelled (no BDM port), i.e. it is always disabled.
+ */
+DISAS_INSN(bgnd)
+{
+    gen_exception(s, s->base.pc_next, EXCP_ILLEGAL);
+}
+
+/*
+ * CPU32 opcode $F800: TBLU/TBLUN/TBLS/TBLSN and LPSTOP.
+ *
+ *  LPSTOP #imm:  F800 01C0 imm
+ *  TBLx <ea>,Dx: F800|ea, 0 Dx[14:12] S[11] R[10] 0 1 SIZE[7:6] 000000
+ *  TBLx Dym:Dyn,Dx: F800|Dym, 0 Dx[14:12] S[11] R[10] 0 0 SIZE[7:6] 000 Dyn
+ *
+ * R = 1 selects the unrounded forms (TBLUN/TBLSN).  The instruction
+ * pages (4-171..4-178) and the GNU assembler agree on this; the encoding
+ * summary in CPU32RM section 4 states the opposite ("R Field:
+ * 0 = Unrounded 1 = Rounded") and is taken to be a misprint.
+ */
+DISAS_INSN(cpu32_f800)
+{
+    uint16_t ext;
+    int size, mode;
+    bool sgn, regform;
+    TCGv dx, y0, y1, res;
+
+    ext = read_im16(env, s);
+
+    if (insn == 0xf800 && ext == 0x01c0) {
+        /*
+         * LPSTOP #<data> (CPU32RM 4-xx): privileged, and "if the bit of
+         * the immediate data corresponding to the S bit is off,
+         * execution of the instruction causes a privilege violation".
+         * Loads SR and stops like STOP; the interrupt mask copy to the
+         * SIM (CPU space $3 broadcast) and the clock stop are not
+         * modelled.
+         */
+        uint16_t sr;
+
+        if (IS_USER(s)) {
+            gen_exception(s, s->base.pc_next, EXCP_PRIVILEGE);
+            return;
+        }
+        sr = read_im16(env, s);
+        if (!(sr & SR_S)) {
+            gen_exception(s, s->base.pc_next, EXCP_PRIVILEGE);
+            return;
+        }
+        gen_set_sr_im(s, sr, 0);
+        tcg_gen_st_i32(tcg_constant_i32(1), tcg_env,
+                       offsetof(CPUState, halted) - offsetof(M68kCPU, env));
+        gen_exception(s, s->pc, EXCP_HLT);
+        return;
+    }
+
+    size = extract32(ext, 6, 2);
+    sgn = ext & 0x800;
+    regform = extract32(insn, 3, 3) == 0;
+    if ((ext & 0x8238) || size == 3 ||
+        (regform ? (ext & 0x100) != 0 : (ext & 0x107) != 0x100)) {
+        disas_undef(env, s, insn);
+        return;
+    }
+    dx = DREG(ext, 12);
+    if (regform) {
+        y0 = DREG(insn, 0);
+        y1 = DREG(ext, 0);
+    } else {
+        TCGv addr, idx;
+
+        /* Only control addressing modes are allowed. */
+        switch (extract32(insn, 3, 3)) {
+        case 1: /* An */
+        case 3: /* (An)+ */
+        case 4: /* -(An) */
+            gen_addr_fault(s);
+            return;
+        }
+        addr = gen_lea(env, s, insn, size);
+        if (IS_NULL_QREG(addr)) {
+            gen_addr_fault(s);
+            return;
+        }
+        /* entry n is at <ea> + Dx[15:8] * size */
+        idx = tcg_temp_new();
+        tcg_gen_extract_i32(idx, dx, 8, 8);
+        tcg_gen_shli_i32(idx, idx, size);
+        tcg_gen_add_i32(idx, idx, addr);
+        y0 = gen_load(s, size, idx, sgn, IS_USER(s));
+        tcg_gen_addi_i32(idx, idx, 1 << size);
+        y1 = gen_load(s, size, idx, sgn, IS_USER(s));
+    }
+    mode = size | (sgn ? 4 : 0) | ((ext & 0x400) ? 0 : 8);
+    res = tcg_temp_new();
+    gen_helper_cpu32_tbl(res, tcg_env, dx, y0, y1, tcg_constant_i32(mode));
+    tcg_gen_mov_i32(dx, res);
+    set_cc_op(s, CC_OP_FLAGS);
+}
+
 static void do_trapcc(DisasContext *s, DisasCompare *c)
 {
     if (c->tcond != TCG_COND_NEVER) {
@@ -5772,6 +5906,7 @@ void register_m68k_insns (CPUM68KState *env)
     BASE(undef,     0000, 0000);
     INSN(arith_im,  0080, fff8, CF_ISA_A);
     INSN(arith_im,  0000, ff00, M68K);
+    INSN(undef,     00c0, ffc0, CPU32);  /* size 11; CHK2 modes below */
     INSN(bitrev,    00c0, fff8, CF_ISA_APLUSC);
     INSN(chk2,      00d0, fff8, CHK2);
     INSN(chk2,      00e8, fff8, CHK2);
@@ -5817,6 +5952,10 @@ void register_m68k_insns (CPUM68KState *env)
     INSN(cas,       0ec0, ffc0, CAS);
     INSN(cas2w,     0cfc, ffff, CAS);
     INSN(cas2l,     0efc, ffff, CAS);
+    /* CPU32: no CAS/CAS2; size 11 is not a valid ORI/CMPI/MOVES either */
+    INSN(undef,     0ac0, ffc0, CPU32);
+    INSN(undef,     0cc0, ffc0, CPU32);
+    INSN(undef,     0ec0, ffc0, CPU32);
     BASE(move,      1000, f000);
     BASE(move,      2000, f000);
     BASE(move,      3000, f000);
@@ -5860,6 +5999,8 @@ void register_m68k_insns (CPUM68KState *env)
     INSN(halt,      4ac8, ffff, M68K);
 #endif
     INSN(pulse,     4acc, ffff, CF_ISA_A);
+    INSN(bgnd,      4afa, ffff, CPU32);
+    INSN(undef,     4ac8, ffff, CPU32);   /* TAS An: no HALT on CPU32 */
     BASE(illegal,   4afc, ffff);
     INSN(mull,      4c00, ffc0, CF_ISA_A);
     INSN(mull,      4c00, ffc0, LONG_MULDIV);
@@ -6008,6 +6149,7 @@ void register_m68k_insns (CPUM68KState *env)
     INSN(wddata,    fb00, ff00, CF_ISA_A);
     INSN(wdebug,    fbc0, ffc0, CF_ISA_A);
 #endif
+    INSN(cpu32_f800, f800, ffc0, CPU32);  /* TBLx, LPSTOP */
     INSN(move16_mem, f600, ffe0, M68040);
     INSN(move16_reg, f620, fff8, M68040);
 #undef INSN
@@ -6048,8 +6190,28 @@ static void m68k_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
     CPUM68KState *env = cpu_env(cpu);
-    uint16_t insn = read_im16(env, dc);
+    uint16_t insn;
 
+    if (m68k_feature(env, M68K_FEATURE_CPU32) && (dc->base.pc_next & 1)) {
+        /*
+         * CPU32RM 6.2.3: instruction fetch from an odd address is an
+         * address error; fault address and return PC are the odd
+         * address.
+         */
+        tcg_gen_st_i32(tcg_constant_i32(dc->base.pc_next), tcg_env,
+                       offsetof(CPUM68KState, mmu.ar));
+        tcg_gen_st_i32(tcg_constant_i32(CPU32_SSW_IN | CPU32_SSW_RW |
+                                        CPU32_SSW_SIZ_WORD |
+                                        (IS_USER(dc) ? 2 : 6)),
+                       tcg_env, offsetof(CPUM68KState, mmu.ssw));
+        gen_exception(dc, dc->base.pc_next, EXCP_ADDRESS);
+        dc->pc_prev = dc->base.pc_next;
+        dc->base.pc_next += 1;
+        dc->pc = dc->base.pc_next;
+        return;
+    }
+
+    insn = read_im16(env, dc);
     opcode_table[insn](env, dc, insn);
     do_writebacks(dc);
 
