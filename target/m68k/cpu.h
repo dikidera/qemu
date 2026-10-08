@@ -166,6 +166,16 @@ typedef struct CPUArchState {
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;
 
+    /*
+     * Optional interrupt acknowledge cycle (CPU32 only): called when the
+     * CPU takes the pending interrupt, returns the vector supplied in the
+     * IACK cycle.  iack_done runs once exception processing has started,
+     * so the interrupt controller can re-evaluate its request.
+     */
+    int (*iack)(void *opaque, int level);
+    void (*iack_done)(void *opaque);
+    void *iack_opaque;
+
     /* Fields from here on are preserved across CPU reset. */
     uint64_t features;
 } CPUM68KState;

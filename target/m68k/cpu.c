@@ -87,7 +87,7 @@ static bool m68k_cpu_has_work(CPUState *cs)
          * CPU32RM 5.1/6.2.2: a processor halted by a double bus fault is
          * only restarted by reset.  A stopped processor (STOP/LPSTOP)
          * resumes only for an interrupt above the mask (or an NMI edge);
-         * other requests are ignored (LPSTOP description, 4-xx).
+         * other requests are ignored (LPSTOP, STOP: CPU32RM 4-84, 4-143).
          */
         if (env->double_fault) {
             return false;
@@ -342,8 +342,8 @@ static void m68010_cpu_initfn(Object *obj)
 /*
  * Motorola CPU32 (MC68330/331/332/333/334/336/338/340/349/376 ...).
  *
- * CPU32RM 1.x / 4.x instruction set summary: the MC68010 instruction set
- * and supervisor model (USP/SSP only, VBR, SFC/DFC, MOVEC, MOVES, RTD,
+ * CPU32RM section 1 instruction list and section 4: the MC68010
+ * instruction set and supervisor model (USP/SSP only, VBR, SFC/DFC, MOVEC, MOVES, RTD,
  * BKPT, format/vector exception frames, privileged MOVE from SR) plus,
  * from the MC68020: 32-bit MULx.L/DIVx.L (and 64-bit forms), Bcc.L,
  * CHK2/CMP2, TRAPcc, LINK.L, EXTB.L and the scaled-index / base

@@ -777,8 +777,15 @@ bool m68k_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if (m68k_feature(env, M68K_FEATURE_CPU32)) {
         if ((interrupt_request & CPU_INTERRUPT_HARD) &&
             !env->double_fault && m68k_cpu32_irq_ready(env)) {
+            if (env->iack) {
+                env->pending_vector = env->iack(env->iack_opaque,
+                                                env->pending_level);
+            }
             cs->exception_index = env->pending_vector;
             do_interrupt_m68k_hardirq(env);
+            if (env->iack_done) {
+                env->iack_done(env->iack_opaque);
+            }
             return true;
         }
         return false;
@@ -1399,7 +1406,7 @@ void HELPER(cmp2)(CPUM68KState *env, int32_t val, int32_t lb, int32_t ub)
 }
 
 /*
- * CPU32 TBLU/TBLUN/TBLS/TBLSN (CPU32RM 4-171..4-178, 4.6).
+ * CPU32 TBLU/TBLUN/TBLS/TBLSN (CPU32RM 4-153..4-161, 4.6).
  * dx holds the interpolation fraction in [7:0]; y0/y1 are ENTRY(n) and
  * ENTRY(n + 1) (table entries or the Dym/Dyn registers).
  * mode: [1:0] size (0 byte, 1 word, 2 long), [2] signed, [3] rounded.

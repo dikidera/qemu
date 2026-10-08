@@ -4698,7 +4698,7 @@ DISAS_INSN(trap)
 }
 
 /*
- * CPU32 BGND (CPU32RM 4-41): enters background debug mode if enabled,
+ * CPU32 BGND (CPU32RM 4-40/4-41): enters background debug mode if enabled,
  * otherwise takes an illegal instruction exception.  Background debug
  * mode is not modelled (no BDM port), i.e. it is always disabled.
  */
@@ -4714,10 +4714,11 @@ DISAS_INSN(bgnd)
  *  TBLx <ea>,Dx: F800|ea, 0 Dx[14:12] S[11] R[10] 0 1 SIZE[7:6] 000000
  *  TBLx Dym:Dyn,Dx: F800|Dym, 0 Dx[14:12] S[11] R[10] 0 0 SIZE[7:6] 000 Dyn
  *
- * R = 1 selects the unrounded forms (TBLUN/TBLSN).  The instruction
- * pages (4-171..4-178) and the GNU assembler agree on this; the encoding
- * summary in CPU32RM section 4 states the opposite ("R Field:
- * 0 = Unrounded 1 = Rounded") and is taken to be a misprint.
+ * R = 1 selects the unrounded forms (TBLUN/TBLSN), as defined by the
+ * TBLS/TBLU instruction pages (CPU32RM 4-153..4-161).  The encoding
+ * summary (4-186) states the opposite ("R Field: 0 = Unrounded
+ * 1 = Rounded"); that contradicts the instruction pages and is taken to
+ * be a misprint.
  */
 DISAS_INSN(cpu32_f800)
 {
@@ -4730,7 +4731,7 @@ DISAS_INSN(cpu32_f800)
 
     if (insn == 0xf800 && ext == 0x01c0) {
         /*
-         * LPSTOP #<data> (CPU32RM 4-xx): privileged, and "if the bit of
+         * LPSTOP #<data> (CPU32RM 4-84): privileged, and "if the bit of
          * the immediate data corresponding to the S bit is off,
          * execution of the instruction causes a privilege violation".
          * Loads SR and stops like STOP; the interrupt mask copy to the

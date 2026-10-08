@@ -175,59 +175,30 @@ static int imb_iack(MC68376State *s, int level)
 /*
  * QEMU's m68k core samples the vector when the request is raised
  * (m68k_set_irq_level).  The CPU32 gets it in the IACK cycle, and the
- * PIT negates its request in that cycle, so wrap the CPU's interrupt
- * entry to run the acknowledge cycle at the right time.  This replaces
- * the CPU class' TCG ops with a copy whose cpu_exec_interrupt goes
- * through here; there is only one CPU per machine.  A proper IACK hook
- * in target/m68k would make this go away.
+ * PIT negates its request in that cycle, so the cpu32 core calls back
+ * into the SIM when it takes the interrupt (env->iack).
  *
  * Level 7 is non-maskable and transition sensitive (5.8.2); the cpu32
  * core implements that (m68k_cpu32_irq_ready()), the IMB only reports
  * the current request level.
  */
-static MC68376State *mc68376_iack_soc;
-static const TCGCPUOps *mc68376_orig_tcg_ops;
-static TCGCPUOps mc68376_tcg_ops;
-
-/* same condition as m68k_cpu_exec_interrupt() uses to take the request */
-static bool mc68376_irq_ready(CPUM68KState *env)
+static int mc68376_cpu_iack(void *opaque, int level)
 {
-    if (m68k_feature(env, M68K_FEATURE_CPU32)) {
-        return !env->double_fault && m68k_cpu32_irq_ready(env);
-    }
-    return ((env->sr & SR_I) >> SR_I_SHIFT) < env->pending_level;
+    return imb_iack(opaque, level);
 }
 
-static bool mc68376_cpu_exec_interrupt(CPUState *cs, int request)
+static void mc68376_cpu_iack_done(void *opaque)
 {
-    CPUM68KState *env = cpu_env(cs);
-    MC68376State *s = mc68376_iack_soc;
-
-    if (s && (request & CPU_INTERRUPT_HARD) && env->pending_level &&
-        mc68376_irq_ready(env)) {
-        int vector = imb_iack(s, env->pending_level);
-        bool taken;
-
-        env->pending_vector = vector;
-        taken = mc68376_orig_tcg_ops->cpu_exec_interrupt(cs, request);
-        imb_irq_update(s);
-        return taken;
-    }
-    return mc68376_orig_tcg_ops->cpu_exec_interrupt(cs, request);
+    imb_irq_update(opaque);
 }
 
 static void mc68376_install_iack(MC68376State *s)
 {
-    CPUClass *cc = CPU_GET_CLASS(s->cpu);
+    CPUM68KState *env = &s->cpu->env;
 
-    mc68376_iack_soc = s;
-    if (cc->tcg_ops == &mc68376_tcg_ops) {
-        return;
-    }
-    mc68376_orig_tcg_ops = cc->tcg_ops;
-    memcpy(&mc68376_tcg_ops, cc->tcg_ops, sizeof(mc68376_tcg_ops));
-    mc68376_tcg_ops.cpu_exec_interrupt = mc68376_cpu_exec_interrupt;
-    cc->tcg_ops = &mc68376_tcg_ops;
+    env->iack = mc68376_cpu_iack;
+    env->iack_done = mc68376_cpu_iack_done;
+    env->iack_opaque = s;
 }
 
 /* ---------------------------------------------------------------------- */
