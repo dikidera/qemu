@@ -196,8 +196,17 @@ struct MC68376TouCAN {
     TouCANFrame smb;
     uint16_t smb_stamp;
 
+    /*
+     * Time of the event being handled by a timer callback (end of frame,
+     * end of resynchronisation), 0 otherwise: a transmission that follows
+     * starts there, not when the callback happens to run.
+     */
+    int64_t evt_ns;
+    int64_t sync_ns;            /* end of the resynchronisation */
+
     /* transmission in progress */
     bool tx_active;
+    int64_t tx_end_ns;
     int tx_mb;                  /* -1 once the buffer was rewritten */
     TouCANFrame tx;
     uint16_t tx_stamp;
@@ -224,7 +233,8 @@ static uint64_t toucan_bit_ps(MC68376TouCAN *m)
     if (!fsys) {
         fsys = 1;
     }
-    return muldiv64(tq_per_bit * sclk_div, 1000000000000ULL, fsys);
+    /* muldiv64() takes a 32-bit multiplier: 10^12 = 10^6 x 10^6 */
+    return muldiv64(tq_per_bit * sclk_div * 1000000, 1000000, fsys);
 }
 
 static int64_t toucan_bits_ns(MC68376TouCAN *m, uint64_t bits)
@@ -242,9 +252,14 @@ static uint64_t toucan_timer_ticks(MC68376TouCAN *m, int64_t now)
     return muldiv64(el, 1000, toucan_bit_ps(m));
 }
 
+static uint16_t toucan_timer_at(MC68376TouCAN *m, int64_t t)
+{
+    return m->timer_base + toucan_timer_ticks(m, t);
+}
+
 static uint16_t toucan_timer_get(MC68376TouCAN *m)
 {
-    return m->timer_base + toucan_timer_ticks(m, mc68376_now());
+    return toucan_timer_at(m, mc68376_now());
 }
 
 /* fold the elapsed bits into the base (before the rate changes) */
@@ -264,7 +279,7 @@ static void toucan_timer_rebase(MC68376TouCAN *m)
 static void toucan_timer_set(MC68376TouCAN *m, uint16_t v)
 {
     m->timer_base = v;
-    m->timer_base_ns = mc68376_now();
+    m->timer_base_ns = m->evt_ns ? m->evt_ns : mc68376_now();
 }
 
 static void toucan_timer_run(MC68376TouCAN *m, bool on)
@@ -552,8 +567,8 @@ static void toucan_update_mode(MC68376TouCAN *m)
         toucan_timer_run(m, true);
         if ((m->mcr & MCR_NOTRDY) && !timer_pending(m->sync_timer)) {
             /* resynchronise: 11 consecutive recessive bits */
-            timer_mod(m->sync_timer,
-                      mc68376_now() + toucan_bits_ns(m, 11));
+            m->sync_ns = mc68376_now() + toucan_bits_ns(m, 11);
+            timer_mod(m->sync_timer, m->sync_ns);
         }
     }
 }
@@ -564,7 +579,9 @@ static void toucan_sync_done(void *opaque)
 
     if (!(m->mcr & (MCR_FRZACK | MCR_STOPACK))) {
         m->mcr &= ~MCR_NOTRDY;
+        m->evt_ns = m->sync_ns;
         toucan_try_tx(m);
+        m->evt_ns = 0;
     }
 }
 
@@ -586,6 +603,7 @@ static void toucan_try_tx(MC68376TouCAN *m)
 {
     int best = -1;
     uint32_t best_key = 0;
+    int64_t start = m->evt_ns ? m->evt_ns : mc68376_now();
     TouCANFrame f;
 
     if (m->tx_active || !toucan_ready(m)) {
@@ -613,9 +631,9 @@ static void toucan_try_tx(MC68376TouCAN *m)
     m->tx_mb = best;
     m->tx_active = true;
     /* time stamp: TIMER at the start of the identifier field (13.4.5) */
-    m->tx_stamp = toucan_timer_get(m) + 1;
-    timer_mod(m->tx_timer,
-              mc68376_now() + toucan_bits_ns(m, frame_bits(&m->tx, true)));
+    m->tx_stamp = toucan_timer_at(m, start) + 1;
+    m->tx_end_ns = start + toucan_bits_ns(m, frame_bits(&m->tx, true));
+    timer_mod(m->tx_timer, m->tx_end_ns);
 }
 
 static void toucan_tx_done(void *opaque)
@@ -628,6 +646,7 @@ static void toucan_tx_done(void *opaque)
         return;
     }
     m->tx_active = false;
+    m->evt_ns = m->tx_end_ns;
 
     if (!(m->ctrl1 & CTRL1_LOOP) && m->soc->canbus) {
         qemu_can_frame cf = { 0 };
@@ -667,6 +686,7 @@ static void toucan_tx_done(void *opaque)
 
     toucan_update_mode(m);
     toucan_try_tx(m);
+    m->evt_ns = 0;
     toucan_irq_update(m);
 }
 
