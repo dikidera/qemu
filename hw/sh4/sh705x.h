@@ -240,6 +240,43 @@ typedef struct SH705xWDT {
     QEMUTimer *timer;
 } SH705xWDT;
 
+/*
+ * On-chip flash memory controller (sh705x_flash.c).  Two generations:
+ * 350 nm parts (SH7052/SH7054/SH7055F) are programmed by the CPU through
+ * FLMCR1/FLMCR2/EBR1/EBR2; 180 nm parts (SH7055S, SH7058) use the
+ * "download" method (FCCS/FPCS/FECS/FKEY/FMATS/FTDAR).
+ */
+#define SH705X_FLASH_MAX_BLOCKS 16
+#define SH705X_FLASH_LATCH      128     /* program unit, bytes */
+
+typedef struct SH705xFlash {
+    SH705xState *soc;
+    bool is_180nm;
+    uint8_t *mem;               /* host pointer to the flash array */
+    uint32_t size;
+    const uint32_t *blocks;     /* erase block start offsets + end */
+    int nblocks;                /* 0: erase/program not modelled */
+    uint32_t flmcr2_begin;      /* 350 nm: first byte under FLMCR2 */
+
+    /* 350 nm */
+    uint8_t flmcr[2];
+    uint8_t ebr[2];
+    uint8_t ebr2_mask;
+    uint8_t latch[SH705X_FLASH_LATCH];
+    int64_t latch_base;         /* -1: program latches empty */
+
+    /* 180 nm */
+    uint8_t fccs, fpcs, fecs, fkey, fmats, ftdar;
+    uint32_t dl_base[2];        /* download address, [0] write, [1] erase */
+    bool dl_valid[2];
+    bool init_done[2];
+    uint32_t arg[2];            /* emulated microcode interface */
+    uint32_t cmd;
+    uint32_t fpfr;
+
+    uint16_t ramer;
+} SH705xFlash;
+
 typedef struct SH705xPort {
     const char *name;       /* "A" */
     uint16_t dr, ior;
@@ -282,6 +319,8 @@ struct SH705xState {
     SH705xCMT cmt;
     SH705xWDT wdt;
     SH705xPort port[SH705X_NUM_PORTS];
+    SH705xFlash flash;
+    uint32_t flash_node;        /* property: 0 (variant default), 180, 350 */
 
     /* plain storage for registers without a behavioural model */
     uint8_t regs[SH705X_IO_SIZE];
@@ -314,6 +353,15 @@ void sh705x_hcan_reset(SH705xHCAN *h);
 uint16_t sh705x_hcan_read(SH705xHCAN *h, uint32_t off);
 void sh705x_hcan_write(SH705xHCAN *h, uint32_t off, uint16_t val,
                        uint16_t mask);
+
+/* sh705x_flash.c */
+bool sh705x_flash_in_range(uint32_t addr);
+bool sh705x_flash_init(SH705xFlash *f, SH705xState *s, Error **errp);
+void sh705x_flash_reset(SH705xFlash *f);
+bool sh705x_flash_load(SH705xState *s, const char *filename);
+uint16_t sh705x_flash_read16(SH705xFlash *f, uint32_t addr);
+void sh705x_flash_write16(SH705xFlash *f, uint32_t addr, uint16_t val,
+                          uint16_t mask);
 
 static inline uint16_t sh705x_merge(uint16_t old, uint16_t val, uint16_t mask)
 {

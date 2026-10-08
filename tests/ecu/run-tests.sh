@@ -51,7 +51,15 @@ if [ -x "$BUILD/qemu-system-sh4eb" ]; then
         case $v in
         7058|7055) check sh$v "$TMP/sh$v.out" "RX1=51454D55" ;;
         esac
+        case $v in
+        7058|7055|7054) check sh$v "$TMP/sh$v.out" "FLASH OK" ;;
+        esac
     done
+    # SH7055 with 180 nm flash (download method), as on the SH7058
+    python3 "$HERE/sh7058_test_rom.py" "$TMP/sh7055s.bin" 7055 180 || exit 1
+    run qemu-system-sh4eb ecu-sh7055 "$TMP/sh7055s.bin" sh7055s \
+        -global sh705x-soc.flash-node=180
+    check sh7055-180nm "$TMP/sh7055s.out" "FLASH OK"
 fi
 
 if [ -x "$BUILD/qemu-system-m32c" ]; then

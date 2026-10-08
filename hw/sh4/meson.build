@@ -8,6 +8,7 @@ sh4_ss.add(when: 'CONFIG_ECU_SH705X', if_true: files(
   'sh705x.c',
   'sh705x_atu.c',
   'sh705x_hcan.c',
+  'sh705x_flash.c',
   'ecu_sh705x.c',
 ))
 

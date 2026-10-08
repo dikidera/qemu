@@ -101,6 +101,42 @@ Both controllers of one chip may share a bus.  Transmissions complete
 immediately and are always acknowledged; bit timing and error counters
 are not modelled.
 
+Flash programming
+~~~~~~~~~~~~~~~~~
+
+The SH705x on-chip flash can be erased and programmed by the firmware
+(self-programming) or by a reflash kernel such as npkern, following the
+sequences npkern uses on real ECUs.  The flash contents live in the
+machine, not in the ``-bios`` file: a system reset keeps reprogrammed
+data, the image file is never written.  Pulse timings are not checked;
+one program/erase pulse always succeeds.
+
+* 350 nm flash (``ecu-sh7052``, ``ecu-sh7054``, ``ecu-sh7055``):
+  ``FLMCR1``/``FLMCR2``/``EBR1``/``EBR2``.  With ``SWEn`` set, byte writes
+  to a 128-byte unit load the program latches and a ``P`` pulse (with
+  ``PSU``) programs them; an ``E`` pulse (with ``ESU``) erases the blocks
+  selected in ``EBR1``/``EBR2``; the dummy writes of program/erase verify
+  (``PV``/``EV``) are ignored.  ``FLMCR1`` controls the flash below
+  0x40000, ``FLMCR2`` the rest.  Erase blocks follow npkern (the SH7054
+  uses the first 14 SH7055 blocks).  On the SH7052 the block layout is not
+  known, so erase/program pulses are only logged.
+
+* 180 nm flash (``ecu-sh7058``, and ``ecu-sh7055`` with
+  ``-global sh705x-soc.flash-node=180``): the download method
+  (``FCCS``/``FPCS``/``FECS``/``FKEY``/``FMATS``/``FTDAR``).  The on-chip
+  programming/erasing routines are Renesas internal and not available, so
+  they are emulated behind their documented calling interface:
+  ``FCCS.SCO = 1`` with ``FKEY = 0xA5`` writes the result (``DPFR``) to the
+  first byte of the download area (on-chip RAM start + ``FTDAR`` x 2 KiB),
+  and a small stub at download address + 32 (initialisation, ``R4`` =
+  ``FPEFEQ``) and + 16 (write: ``R4`` = source, ``R5`` = 128-byte aligned
+  flash destination; erase: ``R4`` = block number) that hands the call to
+  QEMU through private registers at 0xFFFFE810..0xFFFFE81F and returns
+  ``FPFR`` in ``R0`` (0 = success).  Write and erase need ``FKEY = 0x5A``.
+  Only the first 64 bytes of the download area are written.  The ``FPFR``
+  error bit assignment is an approximation; firmware should only rely on
+  0 meaning success.  ``FCCS`` reads 0x80 (``FWE`` pin high, no error).
+
 Engine simulator
 ----------------
 
@@ -224,9 +260,9 @@ SH705x peripherals
   WDT, CMT, ports, A/D0-2 (single and scan modes), SCI0-4, ATU-II
   channels 0-11, HCAN/HCAN2.  Simplified: the channel 10 angle clock
   multiplier, ATU DMA/A-D trigger links other than the interval timer,
-  PFC pin multiplexing (port and timer pins are separate names).  Not
-  modelled: DMAC, UBC, H-UDI, flash programming (writes to the flash
-  registers are stored but the ROM is read only), power down modes.
+  PFC pin multiplexing (port and timer pins are separate names).  Flash
+  programming: see "Flash programming" above.  Not modelled: DMAC, UBC, H-UDI, flash RAM
+  emulation (``RAMER``), the user boot MAT, power down modes.
 
 M32C/80 core
   New ``m32c`` target.  The opcode table is generated from Ghidra's

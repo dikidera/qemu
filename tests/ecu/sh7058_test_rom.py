@@ -12,8 +12,12 @@
 import sys
 from shasm import Asm, Pool
 
-# usage: sh7058_test_rom.py out.bin [7058|7055|7054|7052]
+# usage: sh7058_test_rom.py out.bin [7058|7055|7054|7052] [180|350]
+#   the last argument selects the flash generation the ROM tests (default:
+#   180 nm on the SH7058, 350 nm on the others; nothing on the SH7052)
 VARIANT = sys.argv[2] if len(sys.argv) > 2 else '7058'
+FLASH_NODE = sys.argv[3] if len(sys.argv) > 3 else \
+    {'7058': '180', '7052': None}.get(VARIANT, '350')
 RAM, RAM_TOP, ROM_SIZE, HCAN2 = {
     '7058': (0xFFFF0000, 0xFFFFC000, 1 << 20, True),
     '7055': (0xFFFF6000, 0xFFFFE000, 512 << 10, False),
@@ -56,6 +60,197 @@ a.lit(TEETH, 1, p); a.st('l', 0, 1)
 a.lit(ord('B') << 24 | ord('O') << 16 | ord('O') << 8 | ord('T'), 4, p)
 a.bsr('putc4'); a.nop()
 a.mov_i(10, 4); a.bsr('putc'); a.nop()
+
+# --- flash erase/program, the way the npkern reflash kernel does it
+FLASH_TABLE = 0x7000          # 128 bytes of data to program
+FLASH_OLD = 0x12345678        # initial contents of the test unit
+
+
+def flash_test():
+    f = Pool(a, 'f')
+    n = [0]
+
+    def expect(ok_if_t, code):
+        n[0] += 1
+        lbl = 'fl_ok%d' % n[0]
+        (a.bt if ok_if_t else a.bf)(lbl)
+        a.mov_i(code, 4); a.bra('flash_err'); a.nop()
+        a.label(lbl)
+
+    def ldb(disp):              # r0 = sign-extended byte @(disp, r9)
+        a.raw(0x8490 | disp)
+
+    def stb(disp, val=None):    # byte @(disp, r9) = r0 (or val)
+        if val is not None:
+            a.mov_i(val if val < 0x80 else val - 0x100, 0)
+        a.raw(0x8090 | disp)
+
+    def modb(disp, setb=0, clrb=0):
+        ldb(disp)
+        if setb:
+            a.or_i(setb)
+        if clrb:
+            a.and_i(0xff & ~clrb)
+        stb(disp)
+
+    def call(base_reg, off):    # jsr @(base_reg + off)
+        a.mov(base_reg, 1); a.add_i(off, 1); a.jsr(1); a.nop()
+
+    def loop(name, count, body):
+        a.mov_i(count, 3)
+        a.label(name)
+        body()
+        a.dt(3); a.bf(name)
+
+    if VARIANT == '7058':
+        dest, blk, ftdar_e, ftdar_w = 0xE0080, 15, 2, 4
+    elif VARIANT == '7055':
+        dest, blk, ftdar_e, ftdar_w = 0x70080, 15, 4, 5
+    else:
+        dest, blk, ftdar_e, ftdar_w = 0x50080, 13, None, None
+    src = RAM + 0x400
+
+    a.lit(0xFFFFE800, 9, f)
+    a.lit(dest, 13, f)
+    if FLASH_NODE == '180':
+        # 180/350 nm detection (FKEY is RW), FCCS == FWE, RAMER == 0
+        stb(4, 0x33); ldb(4); a.cmpeq_i(0x33); expect(True, 1)
+        ldb(0); a.cmpeq_i(0x80); expect(True, 2)
+        a.lit(0xFFFFEC26, 1, f); a.ld('w', 1, 0); a.tst(0, 0)
+        expect(True, 3)
+        # download the erase and the write program
+        dl = ((10, RAM + ftdar_e * 0x800, 0, 1, ftdar_e, 4),
+              (12, RAM + ftdar_w * 0x800, 1, 0, ftdar_w, 5))
+        for reg, base, fpcs, fecs, ftdar, code in dl:
+            a.lit(base, reg, f)
+            a.mov_i(-1, 0); a.st('b', 0, reg)       # DPFR = H'FF
+            stb(1, fpcs); stb(2, fecs); stb(6, ftdar)
+            stb(4, 0xA5)
+            modb(0, setb=1)                         # FCCS.SCO = 1
+            for i in range(8):
+                a.nop()
+            a.ld('b', reg, 0); a.tst_i(0xff); expect(True, code)
+        stb(4, 0)
+        # initialise both programs, FPEFEQ = 40 MHz
+        for reg, code in ((10, 6), (12, 7)):
+            a.lit(4000, 4, f); a.mov_i(0, 5)
+            call(reg, 32)
+            a.tst(0, 0); expect(True, code)
+    else:
+        # npkern's 350 nm detection: FLMCR2.SWE2 settable, no FKEY
+        modb(1, setb=0x40); ldb(1); a.tst_i(0x40); expect(False, 1)
+        modb(1, clrb=0x40)
+        stb(4, 0x33); ldb(4); a.cmpeq_i(0x33); expect(False, 2)
+        ldb(0); a.tst_i(0x80); expect(False, 3)     # FWE
+        ldb(1); a.tst_i(0x80); expect(True, 4)      # FLER
+
+    # original contents, and plain CPU writes must not change them
+    a.ld('l', 13, 0); a.lit(FLASH_OLD, 1, f); a.cmpeq(1, 0)
+    expect(True, 8)
+    a.mov_i(0, 0); a.st('l', 0, 13)
+    a.ld('l', 13, 0); a.cmpeq(1, 0); expect(True, 9)
+
+    # erase the block
+    if FLASH_NODE == '180':
+        stb(4, 0x5A)
+        a.mov_i(blk, 4); call(10, 16)
+        a.mov(0, 11); stb(4, 0)
+        a.tst(11, 11); expect(True, 10)
+        a.mov(13, 2)
+
+        def body():
+            a.raw(0x6026); a.cmpeq_i(0xff); expect(True, 11)
+        loop('fl_ev', 32, body)
+    else:
+        modb(1, setb=0x40)                          # SWE2
+        stb(3, 0); stb(2, 0); stb(3, 1 << (blk - 8))
+        modb(1, setb=0x20); modb(1, setb=0x02)      # ESU2, E2
+        modb(1, clrb=0x02); modb(1, clrb=0x20)
+        stb(2, 0); stb(3, 0)
+        modb(1, setb=0x08)                          # EV2
+        a.mov(13, 2)
+
+        def body():
+            a.mov_i(-1, 1); a.st('l', 1, 2)         # dummy write
+            a.raw(0x6026); a.cmpeq_i(0xff); expect(True, 11)
+        loop('fl_ev', 32, body)
+        modb(1, clrb=0x08)
+
+    # program 128 bytes
+    if FLASH_NODE == '180':
+        a.lit(FLASH_TABLE, 2, f); a.lit(src, 5, f)
+
+        def body():
+            a.raw(0x6026); a.st('l', 0, 5); a.add_i(4, 5)
+        loop('fl_cp', 32, body)
+        # FKEY not H'5A: must fail
+        a.lit(src, 4, f); a.mov(13, 5); call(12, 16)
+        a.tst(0, 0); expect(False, 12)
+        stb(4, 0x5A)
+        a.lit(src, 4, f); a.mov(13, 5); call(12, 16)
+        a.mov(0, 11); stb(4, 0)
+        a.tst(11, 11); expect(True, 13)
+    else:
+        a.lit(FLASH_TABLE, 2, f); a.mov(13, 5)
+
+        def body():
+            a.raw(0x6024); a.st('b', 0, 5); a.add_i(1, 5)
+        a.mov_i(0x7f, 3); a.add_i(1, 3)             # 128 bytes
+        a.label('fl_lat')
+        body()
+        a.dt(3); a.bf('fl_lat')
+        modb(1, setb=0x10); modb(1, setb=0x01)      # PSU2, P2
+        modb(1, clrb=0x01); modb(1, clrb=0x10)
+        modb(1, setb=0x04)                          # PV2
+        a.mov(13, 2); a.lit(FLASH_TABLE, 6, f)
+
+        def body():
+            a.mov_i(-1, 1); a.st('l', 1, 2)         # dummy write
+            a.raw(0x6026); a.raw(0x6166); a.cmpeq(1, 0)
+            expect(True, 13)
+        loop('fl_pv', 32, body)
+        modb(1, clrb=0x04)
+        modb(1, clrb=0x40)
+
+    # read back
+    a.mov(13, 2); a.lit(FLASH_TABLE, 6, f)
+
+    def body():
+        a.raw(0x6026); a.raw(0x6166); a.cmpeq(1, 0); expect(True, 14)
+    loop('fl_rd', 32, body)
+
+    a.lit(ord('F') << 24 | ord('L') << 16 | ord('A') << 8 | ord('S'), 4, f)
+    a.bsr('putc4'); a.nop()
+    a.lit(ord('H') << 24 | ord(' ') << 16 | ord('O') << 8 | ord('K'), 4, f)
+    a.bsr('putc4'); a.nop()
+    a.mov_i(10, 4); a.bsr('putc'); a.nop()
+    a.bra('flash_done'); a.nop()
+
+    a.label('flash_err')
+    a.mov(4, 11)
+    a.lit(ord('F') << 24 | ord('L') << 16 | ord('A') << 8 | ord('S'), 4, f)
+    a.bsr('putc4'); a.nop()
+    a.lit(ord('H') << 24 | ord(' ') << 16 | ord('E') << 8 | ord('R'), 4, f)
+    a.bsr('putc4'); a.nop()
+    a.lit(ord('R') << 24 | ord(' ') << 16 | ord('0') << 8 | ord('x'), 4, f)
+    a.bsr('putc4'); a.nop()
+    a.mov(11, 4); a.bsr('puthex'); a.nop()
+    a.mov_i(10, 4); a.bsr('putc'); a.nop()
+    a.bra('flash_done'); a.nop()
+    f.emit()
+    a.label('flash_done')
+
+    here = a.pc
+    a.org(FLASH_TABLE)
+    a.bytes_([(i * 7 + 3) & 0xff for i in range(128)])
+    a.org(dest)
+    for i in range(32):
+        a.long(FLASH_OLD)
+    a.org(here)
+
+
+if FLASH_NODE:
+    flash_test()
 
 # --- ADC0 single conversions on AN0 and AN2
 for ch in (0, 2):

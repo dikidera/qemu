@@ -907,6 +907,9 @@ static uint16_t io_read16(SH705xState *s, uint32_t addr)
     if ((h = hcan_lookup(s, addr, &hoff))) {
         return sh705x_hcan_read(h, hoff);
     }
+    if (sh705x_flash_in_range(addr)) {
+        return sh705x_flash_read16(&s->flash, addr);
+    }
     if (addr >= 0xFFFFEC10 && addr < 0xFFFFEC14) {
         return wdt_read(s, addr - 0xFFFFEC10);
     }
@@ -955,6 +958,10 @@ static void io_write16(SH705xState *s, uint32_t addr, uint16_t val,
 
     if ((h = hcan_lookup(s, addr, &hoff))) {
         sh705x_hcan_write(h, hoff, val, mask);
+        return;
+    }
+    if (sh705x_flash_in_range(addr)) {
+        sh705x_flash_write16(&s->flash, addr, val, mask);
         return;
     }
     if (addr >= 0xFFFFEC10 && addr < 0xFFFFEC14) {
@@ -1156,6 +1163,7 @@ static void sh705x_reset_hold(Object *obj, ResetType type)
     }
 
     sh705x_atu_reset(&s->atu);
+    sh705x_flash_reset(&s->flash);
     for (int i = 0; i < s->nhcan; i++) {
         sh705x_hcan_reset(&s->hcan[i]);
     }
@@ -1212,8 +1220,9 @@ static void sh705x_realize(DeviceState *dev, Error **errp)
     s->cpu->env.sh2_irq_ack = sh705x_irq_ack;
     s->cpu->env.sh2_irq_opaque = s;
 
-    memory_region_init_rom(&s->rom, OBJECT(s), "sh705x.rom", s->rom_size,
-                           &error_fatal);
+    if (!sh705x_flash_init(&s->flash, s, errp)) {
+        return;
+    }
     memory_region_add_subregion(sysmem, 0, &s->rom);
     memory_region_init_ram(&s->ram, OBJECT(s), "sh705x.ram", s->ram_size,
                            &error_fatal);
@@ -1297,6 +1306,8 @@ static const Property sh705x_props[] = {
     DEFINE_PROP_UINT32("avref-mv", SH705xState, avref_mv, 5000),
     DEFINE_PROP_BOOL("wdt-reset", SH705xState, wdt_reset, true),
     DEFINE_PROP_BOOL("kline-echo", SH705xState, kline_echo, false),
+    /* flash process generation (SH7055: 350 or 180 nm), 0 = by variant */
+    DEFINE_PROP_UINT32("flash-node", SH705xState, flash_node, 0),
     DEFINE_PROP_CHR("sci0", SH705xState, sci[0].chr),
     DEFINE_PROP_CHR("sci1", SH705xState, sci[1].chr),
     DEFINE_PROP_CHR("sci2", SH705xState, sci[2].chr),

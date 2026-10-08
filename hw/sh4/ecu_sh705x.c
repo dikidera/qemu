@@ -90,7 +90,11 @@ static void ecu_sh705x_init(MachineState *machine)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
     if (rom) {
-        if (load_image_targphys(rom, 0, m->soc->rom_size, NULL) < 0) {
+        /*
+         * Loaded straight into the flash array rather than as a ROM blob,
+         * so that a reflash survives a system reset.
+         */
+        if (!sh705x_flash_load(m->soc, rom)) {
             error_report("could not load ECU ROM image '%s'", rom);
             exit(1);
         }
