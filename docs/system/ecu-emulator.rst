@@ -415,9 +415,43 @@ CTM4 (10)
 TPU (11)
   Placeholder: register window only (accesses logged as unimplemented).
 
-TouCAN (13)
-  Placeholder: register window only (accesses logged as unimplemented).
-  Attached to ``-machine canbus0=<can-bus id>``.
+TouCAN (13, D.10)
+  Attached to ``-machine canbus0=<can-bus id>``.  16 message buffers
+  (13.4.1) with the receive/transmit codes of Tables 13-2/13-3: receive
+  into the lowest matching EMPTY buffer, else the lowest matching
+  FULL/OVERRUN one (OVERRUN); acceptance masks ``RXGMSK`` (buffers
+  0-13), ``RX14MSK``, ``RX15MSK`` (RTR never compared, IDE always);
+  standard and extended IDs; remote frames trigger the buffers with
+  code %1010 and an exact ID (13.5.5), a transmitted remote frame turns
+  its buffer into an EMPTY receive buffer.  Lock by reading a
+  control/status word, release by reading ``TIMER`` or locking another
+  buffer; a frame for a locked buffer waits in the serial message buffer
+  (13.5.4.2).  BUSY is never shown (transfers are instantaneous).
+  Transmit arbitration: lowest ID first, or lowest buffer first with
+  ``LBUF``.  A frame lasts its length at the programmed bit rate
+  (``fsys / (PRESDIV+1)`` S-clock, ``4 + PROPSEG + PSEG1 + PSEG2`` time
+  quanta per bit) without stuff bits: 47 + 8n bits (standard) or 67 + 8n
+  (extended) including the intermission.  ``TIMER`` counts bits while
+  the prescaler runs; time stamps (high byte in the control/status
+  word, 16 bits in ``ID_LOW`` of standard buffers) are taken at the
+  identifier field; ``TSYNC``.  Own frames are received into an EMPTY
+  matching buffer (13.5.3.2); ``LOOP`` keeps frames off the bus and
+  ignores it.  Every transmission is acknowledged and no bus errors are
+  modelled: ``ESTAT`` reports error active (error passive / warning only
+  from counter values written in debug mode), ``ACKERR`` and the other
+  error bits, bus off and the error interrupt never occur; successful
+  frames decrement the error counters.  ``CANMCR``: reset in debug mode
+  (``HALT``, ``FRZ``, ``FRZACK``, ``NOTRDY``), entered after the current
+  frame, left after 11 bit times; low-power ``STOP`` (only ``CANMCR``
+  accessible, wake-up interrupt and ``SELFWAKE`` on a frame from the
+  bus); ``SOFTRST``.  ``APS`` is stored only; the IMB FREEZE line, the
+  test register ``CANTCR``, pin polarity (``RXMODE``/``TXMODE``),
+  ``SAMP`` and ``RJW`` have no effect.  Interrupts: one request at
+  ``ILCAN`` with ``IARB``, vector ``IVBA:source`` (buffers 0-15, bus
+  off, error, wake-up; lowest number first, Table 13-9), $0F until
+  ``CANICR`` is initialised.  Frames from the bus are received the
+  moment the sender completes them, also while the TouCAN transmits (no
+  arbitration against them).  ``-d int`` logs every frame.
 
 Debugging
 ---------

@@ -99,4 +99,26 @@ if [ -x "$BUILD/qemu-system-m68k" ]; then
     check cpu32 "$TMP/cpu32.out" "CPU32 OK"
 fi
 
+if [ -x "$BUILD/qemu-system-m68k" ]; then
+    # MC68376 TouCAN: loop back, locking, priorities, masks, remote
+    # frames, interrupts, debug/stop modes; one frame is sent on the QEMU
+    # CAN bus (LOOP = 0) and received back by self-reception.  The only
+    # bus client is this TouCAN, so the bus transmission is checked in
+    # the -d int log.
+    python3 "$HERE/mc68376_can_test_rom.py" "$TMP/mc68376can.bin" || exit 1
+    run qemu-system-m68k ecu-mc68376 "$TMP/mc68376can.bin" mc68376can \
+        -machine canbus0=can0 -d int -D "$TMP/mc68376can.log"
+    for p in "RESET MCR OK" "SYNC OK" "BIT RATE OK" "UNINIT VECTOR OK" \
+             "LPB CS=..28 ID=2460 D=1122334455667788" "LOCK RELEASE OK" \
+             "IVBA VECTOR OK" "NO SELF OVERRUN OK" "ARB ID OK" \
+             "ARB LBUF OK" "EXT RX14 OK" "EXT MB5 NO MATCH OK" \
+             "REMOTE RX OK" "REMOTE DATA OK" "TSYNC OK" "BUS SELF RX OK" \
+             "ESTAT PASSIVE OK" "SOFTRST OK" "STOP EXIT OK" \
+             "CAN DONE FAILS=00"; do
+        check mc68376-can "$TMP/mc68376can.out" "$p"
+    done
+    check mc68376-can "$TMP/mc68376can.log" \
+        "toucan: tx mb8 id=0x7e0 dlc=8$"
+fi
+
 exit $fail
